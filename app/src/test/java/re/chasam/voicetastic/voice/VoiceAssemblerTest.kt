@@ -5,8 +5,12 @@ import io.kotest.matchers.booleans.shouldBeFalse
 import io.kotest.matchers.booleans.shouldBeTrue
 import io.kotest.matchers.ints.shouldBeGreaterThan
 import io.kotest.matchers.shouldBe
-import io.kotest.matchers.shouldNotBe
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import re.chasam.voicetastic.model.AmrNbBitrate
 import re.chasam.voicetastic.model.VoiceMessage
 
@@ -26,7 +30,7 @@ class VoiceAssemblerTest : FunSpec({
         val chunks = VoiceChunker.chunkAudio(audio, messageId = 1, bitrate = AmrNbBitrate.MR795)
         chunks.forEach { assembler.onChunkReceived("!sender1", it) }
 
-        delay(500)
+        delay(1000) // allow mutex-guarded coroutines to process
         collectJob.cancel()
 
         results.size shouldBe 1
@@ -56,7 +60,7 @@ class VoiceAssemblerTest : FunSpec({
         val chunks = VoiceChunker.chunkAudio(audio, messageId = 42, bitrate = AmrNbBitrate.MR475)
         chunks.reversed().forEach { assembler.onChunkReceived("!node2", it) }
 
-        delay(500)
+        delay(1000)
         collectJob.cancel()
 
         results.size shouldBe 1
@@ -121,7 +125,7 @@ class VoiceAssemblerTest : FunSpec({
         assembler.onChunkReceived("!dup", chunks[0])
         assembler.onChunkReceived("!dup", chunks[1])
 
-        delay(500)
+        delay(1000)
         collectJob.cancel()
 
         results.size shouldBe 1
@@ -150,7 +154,7 @@ class VoiceAssemblerTest : FunSpec({
         assembler.onChunkReceived("!nodeA", chunks1[0])
         assembler.onChunkReceived("!nodeB", chunks2[0])
 
-        delay(500)
+        delay(1000)
         collectJob.cancel()
 
         results.size shouldBe 2
@@ -169,6 +173,7 @@ class VoiceAssemblerTest : FunSpec({
         val chunks = VoiceChunker.chunkAudio(audio, messageId = 99, bitrate = AmrNbBitrate.MR795)
 
         assembler.onChunkReceived("!node", chunks[0])
+        delay(500) // allow coroutine to process
         assembler.pendingCount() shouldBe 1
 
         assembler.clear()
@@ -183,6 +188,7 @@ class VoiceAssemblerTest : FunSpec({
         val assembler = VoiceAssembler(scope = scope)
 
         assembler.onChunkReceived("!bad", ByteArray(3))
+        delay(200)
         assembler.pendingCount() shouldBe 0
 
         assembler.destroy()
@@ -216,8 +222,39 @@ class VoiceAssemblerTest : FunSpec({
 
         results.size shouldBe 1
         results[0].isComplete.shouldBeFalse()
+        // Audio should be larger than just AMR header because silence frames
+        // are now correctly sized (multiple frames per missing chunk)
         results[0].audioData.size shouldBeGreaterThan VoiceAssembler.AMR_HEADER.size
 
+        assembler.destroy()
+        scope.cancel()
+    }
+
+    test("late duplicate chunks after completion are rejected") {
+        val scope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+        val assembler = VoiceAssembler(chunkTimeoutSeconds = 5, scope = scope)
+        val results = mutableListOf<VoiceMessage>()
+
+        val collectJob = scope.launch {
+            assembler.completedMessages.collect { results.add(it) }
+        }
+        delay(100)
+
+        val audio = ByteArray(100) { 0x11 }
+        val chunks = VoiceChunker.chunkAudio(audio, messageId = 77, bitrate = AmrNbBitrate.MR795)
+        // Complete the message
+        chunks.forEach { assembler.onChunkReceived("!late", it) }
+        delay(500)
+        results.size shouldBe 1
+
+        // Send a late duplicate — should be rejected, not start a new assembly
+        assembler.onChunkReceived("!late", chunks[0])
+        delay(500)
+
+        results.size shouldBe 1 // still just 1
+        assembler.pendingCount() shouldBe 0
+
+        collectJob.cancel()
         assembler.destroy()
         scope.cancel()
     }
@@ -227,4 +264,3 @@ class VoiceAssemblerTest : FunSpec({
         VoiceAssembler.AMR_HEADER shouldBe expected
     }
 })
-

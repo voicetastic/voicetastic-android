@@ -1,17 +1,22 @@
 package re.chasam.voicetastic.bdd
 
-import io.cucumber.java.en.Given
-import io.cucumber.java.en.When
-import io.cucumber.java.en.Then
 import io.cucumber.java.Before
-import io.kotest.matchers.shouldBe
-import io.kotest.matchers.booleans.shouldBeTrue
+import io.cucumber.java.en.Given
+import io.cucumber.java.en.Then
+import io.cucumber.java.en.When
 import io.kotest.matchers.booleans.shouldBeFalse
+import io.kotest.matchers.booleans.shouldBeTrue
 import io.kotest.matchers.collections.shouldHaveSize
 import io.kotest.matchers.ints.shouldBeGreaterThan
 import io.kotest.matchers.ints.shouldBeLessThanOrEqual
-import kotlinx.coroutines.*
-import kotlinx.coroutines.flow.first
+import io.kotest.matchers.shouldBe
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import re.chasam.voicetastic.model.AmrNbBitrate
 import re.chasam.voicetastic.model.VoiceConfig
 import re.chasam.voicetastic.model.VoiceMessage
@@ -121,7 +126,7 @@ class VoiceMessagingSteps {
             for (i in 0 until count) {
                 assembler!!.onChunkReceived(sender, preparedChunks[i]!!)
             }
-            delay(500)
+            delay(1000) // allow async mutex-guarded processing
             collectJob.cancel()
         }
     }
@@ -165,7 +170,7 @@ class VoiceMessagingSteps {
             repeat(times) {
                 assembler!!.onChunkReceived(sender, chunk)
             }
-            delay(500)
+            delay(1000) // allow async processing
             collectJob.cancel()
         }
     }
@@ -189,6 +194,7 @@ class VoiceMessagingSteps {
     fun chunksHaveValidHeaders() {
         chunks.forEachIndexed { idx, chunk ->
             val header = VoiceChunker.parseHeader(chunk)!!
+            header.version shouldBe VoiceChunker.PROTOCOL_VERSION
             header.chunkIndex shouldBe idx
             header.totalChunks shouldBe chunks.size
         }
@@ -208,7 +214,10 @@ class VoiceMessagingSteps {
     @Then("reassembling the chunk payloads should produce the original {int} bytes")
     fun reassemblyMatchesOriginal(size: Int) {
         val reassembled = chunks.flatMap { VoiceChunker.extractPayload(it).toList() }.toByteArray()
-        reassembled shouldBe audioData
+        // VoiceChunker strips the AMR file header before chunking, so
+        // reassembled payloads match the input with AMR header stripped.
+        val expected = VoiceChunker.stripAmrHeader(audioData)
+        reassembled shouldBe expected
     }
 
     @Then("a complete voice message should be assembled")

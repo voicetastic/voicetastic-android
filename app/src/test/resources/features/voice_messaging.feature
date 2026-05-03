@@ -14,7 +14,7 @@ Feature: Voice Messaging
     When I start recording a voice message
     And I stop recording after 3 seconds
     Then the recording should produce AMR-NB audio data
-    And the audio should be chunked into packets of at most 230 bytes each
+    And the audio should be chunked into packets of at most 231 bytes each
     And each chunk should have a 6-byte header with message ID, chunk index, total chunks, and bitrate
     And the chunks should be sent via the PRIVATE_APP port
 

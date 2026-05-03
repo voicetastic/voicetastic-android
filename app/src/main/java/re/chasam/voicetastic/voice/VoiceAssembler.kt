@@ -5,6 +5,9 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import re.chasam.voicetastic.model.AmrNbBitrate
 import re.chasam.voicetastic.model.VoiceMessage
 import java.io.ByteArrayOutputStream
 
@@ -13,6 +16,10 @@ import java.io.ByteArrayOutputStream
  *
  * Handles out-of-order delivery, missing chunks (with timeout + partial play),
  * and concurrent messages from different senders.
+ *
+ * Uses a coroutine [Mutex] instead of `synchronized` for suspension-friendly locking.
+ * Maintains a recently-completed blacklist to reject stale duplicate chunks
+ * that arrive after a message has already been finalized.
  */
 class VoiceAssembler(
     private val chunkTimeoutSeconds: Int = 30,
@@ -24,6 +31,12 @@ class VoiceAssembler(
         private const val TAG = "VoiceAssembler"
         /** AMR-NB file header: "#!AMR\n" */
         val AMR_HEADER = byteArrayOf(0x23, 0x21, 0x41, 0x4D, 0x52, 0x0A)
+        /** AMR-NB NO_DATA silence frame (frame type 15) */
+        private val SILENCE_FRAME = byteArrayOf(0x7C)
+        /** How long to remember completed messages to reject late duplicates */
+        private const val BLACKLIST_EXPIRY_MS = 60_000L
+        /** Max blacklist size to prevent unbounded growth */
+        private const val MAX_BLACKLIST_SIZE = 100
     }
 
     /**
@@ -53,7 +66,11 @@ class VoiceAssembler(
             get() = chunks.size
     }
 
+    private val mutex = Mutex()
     private val assemblies = mutableMapOf<AssemblyKey, AssemblyState>()
+
+    /** Recently-completed message keys with their completion timestamp */
+    private val recentlyCompleted = LinkedHashMap<AssemblyKey, Long>()
 
     private val _completedMessages = MutableSharedFlow<VoiceMessage>(extraBufferCapacity = 16)
     val completedMessages: SharedFlow<VoiceMessage> = _completedMessages.asSharedFlow()
@@ -75,35 +92,43 @@ class VoiceAssembler(
         val payload = VoiceChunker.extractPayload(chunkData)
         val key = AssemblyKey(from, header.messageId)
 
-        synchronized(assemblies) {
-            val state = assemblies.getOrPut(key) {
-                val newState = AssemblyState(
-                    from = from,
-                    messageId = header.messageId,
-                    totalChunks = header.totalChunks,
-                    bitrateIndex = header.bitrateIndex,
-                    destinationId = destinationId,
-                    channel = channel
-                )
-                // Start timeout timer
-                newState.timeoutJob = scope.launch {
-                    delay(chunkTimeoutSeconds * 1000L)
-                    onTimeout(key)
+        scope.launch {
+            mutex.withLock {
+                // Reject chunks for recently-completed messages (late duplicates)
+                if (recentlyCompleted.containsKey(key)) {
+                    Log.d(TAG, "Ignoring late chunk for completed msg ${key.messageId} from ${key.from}")
+                    return@withLock
                 }
-                newState
-            }
 
-            // Store the chunk (ignore duplicates)
-            if (!state.chunks.containsKey(header.chunkIndex)) {
-                state.chunks[header.chunkIndex] = payload
-                Log.d(TAG, "Chunk ${header.chunkIndex + 1}/${header.totalChunks} " +
-                        "for msg ${header.messageId} from $from")
-            }
+                val state = assemblies.getOrPut(key) {
+                    val newState = AssemblyState(
+                        from = from,
+                        messageId = header.messageId,
+                        totalChunks = header.totalChunks,
+                        bitrateIndex = header.bitrateIndex,
+                        destinationId = destinationId,
+                        channel = channel
+                    )
+                    // Start timeout timer
+                    newState.timeoutJob = scope.launch {
+                        delay(chunkTimeoutSeconds * 1000L)
+                        onTimeout(key)
+                    }
+                    newState
+                }
 
-            // Check if complete
-            if (state.isComplete) {
-                state.timeoutJob?.cancel()
-                finalizeMessage(key, state, isPartial = false)
+                // Store the chunk (ignore duplicates)
+                if (!state.chunks.containsKey(header.chunkIndex)) {
+                    state.chunks[header.chunkIndex] = payload
+                    Log.d(TAG, "Chunk ${header.chunkIndex + 1}/${header.totalChunks} " +
+                            "for msg ${header.messageId} from $from")
+                }
+
+                // Check if complete
+                if (state.isComplete) {
+                    state.timeoutJob?.cancel()
+                    finalizeMessage(key, state, isPartial = false)
+                }
             }
         }
     }
@@ -111,8 +136,8 @@ class VoiceAssembler(
     /**
      * Called when the timeout elapses for an incomplete message.
      */
-    private fun onTimeout(key: AssemblyKey) {
-        synchronized(assemblies) {
+    private suspend fun onTimeout(key: AssemblyKey) {
+        mutex.withLock {
             val state = assemblies[key] ?: return
             Log.w(TAG, "Timeout for msg ${key.messageId} from ${key.from}: " +
                     "${state.receivedCount}/${state.totalChunks} chunks received")
@@ -128,6 +153,7 @@ class VoiceAssembler(
 
     /**
      * Assemble audio data from received chunks and emit a completed VoiceMessage.
+     * Must be called while holding [mutex].
      */
     private fun finalizeMessage(key: AssemblyKey, state: AssemblyState, isPartial: Boolean) {
         val audioData = assembleAudio(state)
@@ -144,6 +170,10 @@ class VoiceAssembler(
             channel = state.channel
         )
         assemblies.remove(key)
+
+        // Add to blacklist to reject late duplicates
+        addToBlacklist(key)
+
         _completedMessages.tryEmit(message)
 
         if (isPartial) {
@@ -157,11 +187,15 @@ class VoiceAssembler(
     /**
      * Concatenate chunks in order, filling silence for missing ones.
      * Returns a valid AMR-NB byte stream (with file header).
+     *
+     * Missing chunks are replaced with the correct number of silence frames
+     * based on the bitrate's frame size, preserving audio timeline alignment.
      */
     private fun assembleAudio(state: AssemblyState): ByteArray {
         val output = ByteArrayOutputStream()
+        val bitrate = AmrNbBitrate.entries.getOrElse(state.bitrateIndex) { AmrNbBitrate.MR795 }
 
-        // Write AMR-NB file header
+        // Write AMR-NB file header (chunks carry raw frames, no file header)
         output.write(AMR_HEADER)
 
         // Write chunks in order
@@ -170,9 +204,13 @@ class VoiceAssembler(
             if (chunkPayload != null) {
                 output.write(chunkPayload)
             } else {
-                // Fill with silence frame for missing chunk
-                // AMR-NB silence frame (NO_DATA mode, ~1 byte)
-                output.write(createSilenceFrame())
+                // Calculate how many AMR frames would fit in a full chunk payload,
+                // then emit that many silence frames to preserve timing.
+                val expectedPayloadSize = VoiceChunker.MAX_PAYLOAD_SIZE
+                val silenceFrameCount = bitrate.framesIn(expectedPayloadSize).coerceAtLeast(1)
+                repeat(silenceFrameCount) {
+                    output.write(SILENCE_FRAME)
+                }
             }
         }
 
@@ -180,26 +218,46 @@ class VoiceAssembler(
     }
 
     /**
-     * Create a minimal AMR-NB silence frame.
-     * Frame type 15 (NO_DATA) = single byte 0x7C
+     * Track a recently-completed message to reject late duplicate chunks.
+     * Evicts entries older than [BLACKLIST_EXPIRY_MS] and caps at [MAX_BLACKLIST_SIZE].
      */
-    private fun createSilenceFrame(): ByteArray {
-        // AMR-NB NO_DATA frame: frame type 15, padded
-        return byteArrayOf(0x7C)
+    private fun addToBlacklist(key: AssemblyKey) {
+        val now = System.currentTimeMillis()
+
+        // Evict expired entries
+        val iterator = recentlyCompleted.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (now - entry.value > BLACKLIST_EXPIRY_MS) {
+                iterator.remove()
+            } else {
+                break // LinkedHashMap is insertion-ordered, so later entries are newer
+            }
+        }
+
+        // Cap size
+        while (recentlyCompleted.size >= MAX_BLACKLIST_SIZE) {
+            recentlyCompleted.entries.iterator().let { it.next(); it.remove() }
+        }
+
+        recentlyCompleted[key] = now
     }
 
     /**
      * Get the number of messages currently being assembled.
      */
-    fun pendingCount(): Int = synchronized(assemblies) { assemblies.size }
+    fun pendingCount(): Int = runBlocking { mutex.withLock { assemblies.size } }
 
     /**
      * Clear all pending assemblies and cancel timeouts.
      */
     fun clear() {
-        synchronized(assemblies) {
-            assemblies.values.forEach { it.timeoutJob?.cancel() }
-            assemblies.clear()
+        runBlocking {
+            mutex.withLock {
+                assemblies.values.forEach { it.timeoutJob?.cancel() }
+                assemblies.clear()
+                recentlyCompleted.clear()
+            }
         }
     }
 
@@ -211,5 +269,3 @@ class VoiceAssembler(
         scope.cancel()
     }
 }
-
-
