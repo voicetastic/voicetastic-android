@@ -27,7 +27,10 @@ class MeshServiceManager(private val context: Context) {
     companion object {
         private const val TAG = "MeshServiceManager"
         private const val MTU_SIZE = 512
-        private const val POLL_INTERVAL_MS = 1000L
+        // Notifications drive real-time updates; the poll is only a safety net
+        // for missed FromNum notifications. Aggressive polling can starve the
+        // firmware's BLE stack and trigger watchdog reboots on some boards.
+        private const val POLL_INTERVAL_MS = 30_000L
     }
 
     data class IncomingText(val from: String, val to: String, val text: String, val channel: Int = 0, val timestamp: Long = System.currentTimeMillis())
@@ -104,6 +107,12 @@ class MeshServiceManager(private val context: Context) {
     private val _moduleConfigs = MutableStateFlow<Map<String, MeshProtos.ModuleConfig>>(emptyMap())
     val moduleConfigs: StateFlow<Map<String, MeshProtos.ModuleConfig>> = _moduleConfigs.asStateFlow()
 
+    /** Emits the firmware's configCompleteId after a config burst finishes. */
+    private val _configComplete = MutableSharedFlow<Int>(extraBufferCapacity = 8)
+    val configComplete: SharedFlow<Int> = _configComplete.asSharedFlow()
+
+    private var pendingConfigId: Int = 0
+
     private val nodeMap = mutableMapOf<Int, MeshNode>()
 
     val isConnected: Boolean
@@ -175,6 +184,7 @@ class MeshServiceManager(private val context: Context) {
     @SuppressLint("MissingPermission")
     fun disconnect() {
         stopPolling()
+        setupCompleted = false
         try { bluetoothGatt?.disconnect() } catch (_: Exception) {}
         try { bluetoothGatt?.close() } catch (_: Exception) {}
         bluetoothGatt = null
@@ -390,8 +400,14 @@ class MeshServiceManager(private val context: Context) {
     }
 
     private var pollingJob: Job? = null
+    private var setupCompleted: Boolean = false
 
     private fun onSetupComplete() {
+        // Guard against duplicate invocations (descriptor write callback can
+        // fire more than once on reconnect; calling requestConfig in a loop
+        // would hammer the firmware with redundant want_config_id packets).
+        if (setupCompleted) return
+        setupCompleted = true
         _connectionState.value = "CONNECTED"
         Log.i(TAG, "BLE setup complete, requesting config")
         scope.launch {
@@ -438,13 +454,26 @@ class MeshServiceManager(private val context: Context) {
     }
 
     private suspend fun requestConfig() {
-        val configId = (System.currentTimeMillis() % Int.MAX_VALUE).toInt()
+        // configId must be non-zero — firmware ignores want_config_id == 0.
+        val configId = ((System.currentTimeMillis().toInt() and 0x7fffffff)).coerceAtLeast(1)
+        pendingConfigId = configId
+        Log.i(TAG, "Requesting full config (id=$configId)")
+        // NOTE: do NOT null out the cached configs here. If we did, and the
+        // user pressed "Apply" before the refresh completes, we would write
+        // back default/zero values that can crash the radio task on the
+        // firmware (and trigger a watchdog bootloop).
         val toRadio = MeshProtos.ToRadio.newBuilder()
             .setWantConfigId(configId)
             .build()
         writeToRadio(toRadio)
+        // Drain whatever the firmware queued in response.
         delay(500)
         readAllFromRadio()
+        // Some firmwares enqueue the burst lazily; do a couple more drains.
+        repeat(3) {
+            delay(500)
+            readAllFromRadio()
+        }
     }
 
     @SuppressLint("MissingPermission")
@@ -495,8 +524,16 @@ class MeshServiceManager(private val context: Context) {
                 val info = fromRadio.myInfo
                 myNodeNum = info.myNodeNum
                 _myNodeId.value = MeshtasticBle.nodeNumToId(myNodeNum)
-                _firmwareVersion.value = info.firmwareVersion
-                Log.i(TAG, "My node: ${_myNodeId.value} (fw: ${info.firmwareVersion})")
+                Log.i(TAG, "My node: ${_myNodeId.value} (reboot_count=${info.rebootCount})")
+            }
+
+            fromRadio.hasMetadata() -> {
+                // Modern firmware (≥2.3) reports firmware version here, not in MyNodeInfo.
+                val md = fromRadio.metadata
+                if (md.firmwareVersion.isNotEmpty()) {
+                    _firmwareVersion.value = md.firmwareVersion
+                }
+                Log.i(TAG, "Device metadata: fw=${md.firmwareVersion} hw=${md.hwModel} role=${md.role}")
             }
 
             fromRadio.hasNodeInfo() -> {
@@ -534,6 +571,7 @@ class MeshServiceManager(private val context: Context) {
 
             fromRadio.configCompleteId != 0 -> {
                 Log.i(TAG, "Config complete (id=${fromRadio.configCompleteId})")
+                _configComplete.tryEmit(fromRadio.configCompleteId)
             }
         }
     }
@@ -619,12 +657,15 @@ class MeshServiceManager(private val context: Context) {
             PortNum.NODEINFO_APP -> {
                 try {
                     val user = MeshProtos.User.parseFrom(data.payload)
-                    nodeMap[fromNum] = MeshNode(
-                        nodeId = MeshtasticBle.nodeNumToId(fromNum),
+                    val existing = nodeMap[fromNum]
+                    nodeMap[fromNum] = (existing ?: MeshNode(nodeId = MeshtasticBle.nodeNumToId(fromNum))).copy(
                         longName = user.longName,
                         shortName = user.shortName
                     )
                     _nodes.value = nodeMap.values.toList()
+                    if (fromNum == myNodeNum) {
+                        _owner.value = user
+                    }
                 } catch (_: Exception) {}
             }
 
@@ -842,7 +883,7 @@ class MeshServiceManager(private val context: Context) {
      */
     fun factoryReset(): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
-            .setFactoryReset(true)
+            .setFactoryResetConfig(1)
             .build()
         return sendAdminMessage(admin)
     }

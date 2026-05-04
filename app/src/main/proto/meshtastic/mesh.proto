@@ -75,12 +75,19 @@ message MeshPacket {
     bytes encrypted = 5;
   }
   fixed32 id = 6;
-  float rx_snr = 7;
-  fixed32 rx_time = 8;
+  fixed32 rx_time = 7;
+  float rx_snr = 8;
   uint32 hop_limit = 9;
   bool want_ack = 10;
   Priority priority = 11;
   int32 rx_rssi = 12;
+  bool via_mqtt = 14;
+  uint32 hop_start = 15;
+  bytes public_key = 16;
+  bool pki_encrypted = 17;
+  uint32 next_hop = 18;
+  uint32 relay_node = 19;
+  uint32 tx_after = 20;
 
   enum Priority {
     UNSET = 0;
@@ -115,25 +122,55 @@ message DeviceMetrics {
 }
 
 message MyNodeInfo {
+  // Field tags must match real firmware. Modern firmware no longer sends
+  // firmware_version or has_gps here — firmware_version is in DeviceMetadata.
   fixed32 my_node_num = 1;
-  bool has_gps = 2;
-  uint32 max_channels = 3;
-  string firmware_version = 4;
-  uint32 reboot_count = 5;
+  uint32 reboot_count = 8;
+  uint32 min_app_version = 11;
+  bytes device_id = 12;
+  string pio_env = 13;
+}
+
+// Subset of the real DeviceMetadata used by FromRadio.metadata (field 13).
+// Modern firmware (≥2.3) reports firmware version here, not in MyNodeInfo.
+message DeviceMetadata {
+  string firmware_version = 1;
+  uint32 device_state_version = 2;
+  bool canShutdown = 3;
+  bool hasWifi = 4;
+  bool hasBluetooth = 5;
+  bool hasEthernet = 6;
+  Config.DeviceConfig.Role role = 7;
+  uint32 position_flags = 8;
+  HardwareModel hw_model = 9;
+  bool hasRemoteHardware = 10;
+  bool hasPKC = 11;
+  uint32 excluded_modules = 12;
 }
 
 message FromRadio {
   uint32 id = 1;
+  // Field tags MUST match the real Meshtastic firmware.
+  // Previously these were swapped, which caused config packets to be
+  // silently dropped (Config at tag 5 was unreachable; tag 7 was being
+  // mis-typed as a Config message instead of config_complete_id uint32).
   oneof payload_variant {
     MeshPacket packet = 2;
     MyNodeInfo my_info = 3;
     NodeInfo node_info = 4;
-    Channel channel = 6;
-    Config config = 7;
-    ModuleConfig moduleConfig = 8;
-    MeshPacket queueStatus = 9;
-    uint32 config_complete_id = 10;
-    bool rebooted = 11;
+    Config config = 5;
+    // LogRecord log_record = 6;  // not modelled here
+    uint32 config_complete_id = 7;
+    bool rebooted = 8;
+    ModuleConfig moduleConfig = 9;
+    Channel channel = 10;
+    MeshPacket queueStatus = 11;
+    // bytes xmodemPacket = 12;  // not modelled
+    DeviceMetadata metadata = 13;
+    // MqttClientProxyMessage mqttClientProxyMessage = 14;
+    // FileInfo fileInfo = 15;
+    // ClientNotification clientNotification = 16;
+    // DeviceUIConfig deviceuiConfig = 17;
   }
 }
 
@@ -323,6 +360,8 @@ message Config {
     float override_frequency = 14;
     repeated uint32 ignore_incoming = 103;
     bool ignore_mqtt = 104;
+    bool config_ok_to_mqtt = 105;
+    bool pa_fan_disabled = 106;
 
     enum RegionCode {
       UNSET = 0;
@@ -341,6 +380,17 @@ message Config {
       LORA_24 = 13;
       UA_433 = 14;
       UA_868 = 15;
+      MY_433 = 16;
+      MY_919 = 17;
+      SG_923 = 18;
+      PH_433 = 19;
+      PH_868 = 20;
+      PH_915 = 21;
+      ANZ_433 = 22;
+      KZ_433 = 23;
+      KZ_863 = 24;
+      NP_865 = 25;
+      BR_902 = 26;
     }
 
     enum ModemPreset {
@@ -563,31 +613,70 @@ message ModuleConfig {
   }
 }
 
-// AdminMessage for writing configuration to a local device
+// AdminMessage for writing configuration to a local device.
+// Field tags MUST match real Meshtastic firmware (admin.proto upstream).
+// Previously these were sequentially numbered (2,3,4,…) which meant every
+// set_config/set_owner/set_channel/reboot/factory_reset packet sent by this
+// app was silently ignored or mis-parsed by the firmware.
 message AdminMessage {
-  oneof payload_variant {
-    // Read requests
-    uint32 get_config_request = 2;
-    uint32 get_module_config_request = 3;
-    uint32 get_channel_request = 6;
-    bool get_owner_request = 7;
-
-    // Read responses
-    Config get_config_response = 4;
-    ModuleConfig get_module_config_response = 5;
-    Channel get_channel_response = 8;
-    User get_owner_response = 9;
-
-    // Write commands
-    Config set_config = 10;
-    ModuleConfig set_module_config = 11;
-    Channel set_channel = 12;
-    User set_owner = 13;
-
-    // Actions
-    int32 reboot_seconds = 14;
-    int32 reboot_ota_seconds = 15;
-    bool factory_reset = 16;
-    bool nodedb_reset = 17;
+  // ConfigType enum used by get_config_request (real proto uses an enum,
+  // not a uint32 — kept as enum for wire-compat).
+  enum ConfigType {
+    DEVICE_CONFIG = 0;
+    POSITION_CONFIG = 1;
+    POWER_CONFIG = 2;
+    NETWORK_CONFIG = 3;
+    DISPLAY_CONFIG = 4;
+    LORA_CONFIG = 5;
+    BLUETOOTH_CONFIG = 6;
+    SECURITY_CONFIG = 7;
+    SESSIONKEY_CONFIG = 8;
+    DEVICEUI_CONFIG = 9;
   }
+
+  enum ModuleConfigType {
+    MQTT_CONFIG = 0;
+    SERIAL_CONFIG = 1;
+    EXTNOTIF_CONFIG = 2;
+    STOREFORWARD_CONFIG = 3;
+    RANGETEST_CONFIG = 4;
+    TELEMETRY_CONFIG = 5;
+    CANNEDMSG_CONFIG = 6;
+    AUDIO_CONFIG = 7;
+    REMOTEHARDWARE_CONFIG = 8;
+    NEIGHBORINFO_CONFIG = 9;
+    AMBIENTLIGHTING_CONFIG = 10;
+    DETECTIONSENSOR_CONFIG = 11;
+    PAXCOUNTER_CONFIG = 12;
+  }
+
+  oneof payload_variant {
+    // Read requests / responses (real firmware tags)
+    uint32 get_channel_request = 1;
+    Channel get_channel_response = 2;
+    bool get_owner_request = 3;
+    User get_owner_response = 4;
+    ConfigType get_config_request = 5;
+    Config get_config_response = 6;
+    ModuleConfigType get_module_config_request = 7;
+    ModuleConfig get_module_config_response = 8;
+
+    // Write commands (real firmware tags — note 32+, not 10+)
+    User set_owner = 32;
+    Channel set_channel = 33;
+    Config set_config = 34;
+    ModuleConfig set_module_config = 35;
+
+    // Actions (real firmware tags)
+    int32 reboot_ota_seconds = 95;
+    int32 reboot_seconds = 97;
+    int32 shutdown_seconds = 98;
+    int32 factory_reset_config = 99;
+    int32 factory_reset_device = 94;
+    int32 nodedb_reset = 100;
+  }
+
+  // Session passkey, required by firmware ≥2.5 for protected admin operations.
+  // Optional for now — firmware may accept unsigned admin from the local node.
+  bytes session_passkey = 101;
 }

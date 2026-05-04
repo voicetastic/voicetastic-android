@@ -61,16 +61,8 @@ class ConfigViewModel(
     private val _loraState = MutableStateFlow(LoraUiState())
     val loraState: StateFlow<LoraUiState> = _loraState.asStateFlow()
 
-    val regions = listOf(
-        "UNSET", "US", "EU_433", "EU_868", "CN", "JP", "ANZ", "KR",
-        "TW", "RU", "IN", "NZ_865", "TH", "LORA_24", "UA_433", "UA_868"
-    )
-
-    val modemPresets = listOf(
-        "LONG_FAST", "LONG_SLOW", "VERY_LONG_SLOW",
-        "MEDIUM_SLOW", "MEDIUM_FAST",
-        "SHORT_SLOW", "SHORT_FAST", "LONG_MODERATE", "SHORT_TURBO"
-    )
+    val regions: List<String> = enumNames(MeshProtos.Config.LoRaConfig.RegionCode.values())
+    val modemPresets: List<String> = enumNames(MeshProtos.Config.LoRaConfig.ModemPreset.values())
 
     // ========================  DEVICE  ========================
 
@@ -90,12 +82,9 @@ class ConfigViewModel(
     private val _deviceState = MutableStateFlow(DeviceUiState())
     val deviceState: StateFlow<DeviceUiState> = _deviceState.asStateFlow()
 
-    val deviceRoles = listOf(
-        "CLIENT", "CLIENT_MUTE", "ROUTER", "ROUTER_CLIENT", "REPEATER",
-        "TRACKER", "SENSOR", "TAK", "CLIENT_HIDDEN", "LOST_AND_FOUND", "TAK_TRACKER"
-    )
+    val deviceRoles: List<String> = enumNames(MeshProtos.Config.DeviceConfig.Role.values())
 
-    val rebroadcastModes = listOf("ALL", "ALL_SKIP_DECODING", "LOCAL_ONLY", "KNOWN_ONLY")
+    val rebroadcastModes: List<String> = enumNames(MeshProtos.Config.DeviceConfig.RebroadcastMode.values())
 
     // ========================  POSITION  ========================
 
@@ -113,7 +102,7 @@ class ConfigViewModel(
     private val _positionState = MutableStateFlow(PositionUiState())
     val positionState: StateFlow<PositionUiState> = _positionState.asStateFlow()
 
-    val gpsModes = listOf("DISABLED", "ENABLED", "NOT_PRESENT")
+    val gpsModes: List<String> = enumNames(MeshProtos.Config.PositionConfig.GpsMode.values())
 
     // ========================  POWER  ========================
 
@@ -146,7 +135,7 @@ class ConfigViewModel(
     private val _networkState = MutableStateFlow(NetworkUiState())
     val networkState: StateFlow<NetworkUiState> = _networkState.asStateFlow()
 
-    val addressModes = listOf("DHCP", "STATIC")
+    val addressModes: List<String> = enumNames(MeshProtos.Config.NetworkConfig.AddressMode.values())
 
     // ========================  DISPLAY  ========================
 
@@ -166,10 +155,10 @@ class ConfigViewModel(
     private val _displayState = MutableStateFlow(DisplayUiState())
     val displayState: StateFlow<DisplayUiState> = _displayState.asStateFlow()
 
-    val gpsFormats = listOf("DEC", "DMS", "UTM", "MGRS", "OLC", "OSGR")
-    val displayUnits = listOf("METRIC", "IMPERIAL")
-    val oledTypes = listOf("OLED_AUTO", "OLED_SSD1306", "OLED_SH1106", "OLED_SH1107")
-    val displayModes = listOf("DEFAULT", "TWOCOLOR", "INVERTED", "COLOR")
+    val gpsFormats: List<String> = enumNames(MeshProtos.Config.DisplayConfig.GpsCoordinateFormat.values())
+    val displayUnits: List<String> = enumNames(MeshProtos.Config.DisplayConfig.DisplayUnits.values())
+    val oledTypes: List<String> = enumNames(MeshProtos.Config.DisplayConfig.OledType.values())
+    val displayModes: List<String> = enumNames(MeshProtos.Config.DisplayConfig.DisplayMode.values())
 
     // ========================  BLUETOOTH  ========================
 
@@ -182,7 +171,7 @@ class ConfigViewModel(
     private val _bluetoothState = MutableStateFlow(BluetoothUiState())
     val bluetoothState: StateFlow<BluetoothUiState> = _bluetoothState.asStateFlow()
 
-    val pairingModes = listOf("RANDOM_PIN", "FIXED_PIN", "NO_PIN")
+    val pairingModes: List<String> = enumNames(MeshProtos.Config.BluetoothConfig.PairingMode.values())
 
     // ========================  CHANNELS  ========================
 
@@ -198,51 +187,68 @@ class ConfigViewModel(
     private val _channelsState = MutableStateFlow<List<ChannelUiState>>(emptyList())
     val channelsState: StateFlow<List<ChannelUiState>> = _channelsState.asStateFlow()
 
-    val channelRoles = listOf("DISABLED", "PRIMARY", "SECONDARY")
+    val channelRoles: List<String> = enumNames(MeshProtos.Channel.Role.values())
 
     // ========================  VOICE CONFIG  ========================
 
     val currentVoiceConfig: StateFlow<VoiceConfig> = voiceConfig.asStateFlow()
 
+    // ========================  DIRTY TRACKING  ========================
+    // When the user edits a section, we won't overwrite it with subsequent
+    // proto pushes from the device until they Apply (or until refreshDeviceConfig()
+    // explicitly resets the flag).
+    private val dirty: MutableMap<String, Boolean> = mutableMapOf()
+    private fun markDirty(section: String) { dirty[section] = true }
+    private fun isDirty(section: String) = dirty[section] == true
+    private fun clearDirty() { dirty.clear() }
+
     // ========================  INIT — FLOW COLLECTION  ========================
 
     init {
-        // When connection state becomes CONNECTED, sync config after a delay
+        // Re-sync UI when the firmware signals "config burst complete".
+        viewModelScope.launch {
+            meshService.configComplete.collect {
+                clearDirty()
+                syncFromServiceFlows()
+                _configStatus.value = "Config received"
+            }
+        }
+
+        // Also do an initial sync once connected, in case configComplete is missed.
         viewModelScope.launch {
             meshService.connectionState.collect { state ->
                 if (state == "CONNECTED") {
-                    // Wait for the automatic config request to complete
-                    kotlinx.coroutines.delay(2000)
+                    kotlinx.coroutines.delay(3000)
                     syncFromServiceFlows()
                 }
             }
         }
 
-        // Also observe each config flow for real-time updates
+        // Per-section flow observers — only apply if the user hasn't dirtied that section.
         viewModelScope.launch {
-            meshService.radioConfig.collect { lora -> if (lora != null) updateLoraFromProto(lora) }
+            meshService.radioConfig.collect { lora -> if (lora != null && !isDirty("lora")) updateLoraFromProto(lora) }
         }
         viewModelScope.launch {
-            meshService.deviceConfig.collect { dev -> if (dev != null) updateDeviceFromProto(dev) }
+            meshService.deviceConfig.collect { dev -> if (dev != null && !isDirty("device")) updateDeviceFromProto(dev) }
         }
         viewModelScope.launch {
-            meshService.positionConfig.collect { pos -> if (pos != null) updatePositionFromProto(pos) }
+            meshService.positionConfig.collect { pos -> if (pos != null && !isDirty("position")) updatePositionFromProto(pos) }
         }
         viewModelScope.launch {
-            meshService.powerConfig.collect { pwr -> if (pwr != null) updatePowerFromProto(pwr) }
+            meshService.powerConfig.collect { pwr -> if (pwr != null && !isDirty("power")) updatePowerFromProto(pwr) }
         }
         viewModelScope.launch {
-            meshService.networkConfig.collect { net -> if (net != null) updateNetworkFromProto(net) }
+            meshService.networkConfig.collect { net -> if (net != null && !isDirty("network")) updateNetworkFromProto(net) }
         }
         viewModelScope.launch {
-            meshService.displayConfig.collect { dsp -> if (dsp != null) updateDisplayFromProto(dsp) }
+            meshService.displayConfig.collect { dsp -> if (dsp != null && !isDirty("display")) updateDisplayFromProto(dsp) }
         }
         viewModelScope.launch {
-            meshService.bluetoothConfig.collect { bt -> if (bt != null) updateBluetoothFromProto(bt) }
+            meshService.bluetoothConfig.collect { bt -> if (bt != null && !isDirty("bluetooth")) updateBluetoothFromProto(bt) }
         }
         viewModelScope.launch {
             meshService.owner.collect { user ->
-                if (user != null) {
+                if (user != null && !isDirty("owner")) {
                     _ownerState.value = OwnerUiState(
                         longName = user.longName,
                         shortName = user.shortName,
@@ -253,70 +259,54 @@ class ConfigViewModel(
         }
         viewModelScope.launch {
             meshService.channels.collect { chList ->
-                if (chList.isNotEmpty()) {
-                    _channelsState.value = chList.map { ch ->
-                        ChannelUiState(
-                            index = ch.index,
-                            role = ch.role.let {
-                                if (it == MeshProtos.Channel.Role.UNRECOGNIZED) "PRIMARY" else it.name
-                            },
-                            name = if (ch.hasSettings()) ch.settings.name else "",
-                            pskHex = if (ch.hasSettings()) ch.settings.psk.toByteArray().toHex() else "",
-                            uplinkEnabled = if (ch.hasSettings()) ch.settings.uplinkEnabled else false,
-                            downlinkEnabled = if (ch.hasSettings()) ch.settings.downlinkEnabled else false
-                        )
-                    }
+                if (chList.isNotEmpty() && !isDirty("channels")) {
+                    _channelsState.value = chList.map { mapChannel(it) }
                 }
             }
         }
     }
 
+    private fun mapChannel(ch: MeshProtos.Channel): ChannelUiState = ChannelUiState(
+        index = ch.index,
+        role = enumDisplay(ch.role, "PRIMARY"),
+        name = if (ch.hasSettings()) ch.settings.name else "",
+        pskHex = if (ch.hasSettings()) ch.settings.psk.toByteArray().toHex() else "",
+        uplinkEnabled = if (ch.hasSettings()) ch.settings.uplinkEnabled else false,
+        downlinkEnabled = if (ch.hasSettings()) ch.settings.downlinkEnabled else false
+    )
+
     /**
      * Manually sync all UI state from the current values in the service StateFlows.
      * This ensures fields are populated even if the flow emission was missed.
+     * Respects dirty flags — won't overwrite user edits.
      */
     private fun syncFromServiceFlows() {
-        meshService.radioConfig.value?.let { updateLoraFromProto(it) }
-        meshService.deviceConfig.value?.let { updateDeviceFromProto(it) }
-        meshService.positionConfig.value?.let { updatePositionFromProto(it) }
-        meshService.powerConfig.value?.let { updatePowerFromProto(it) }
-        meshService.networkConfig.value?.let { updateNetworkFromProto(it) }
-        meshService.displayConfig.value?.let { updateDisplayFromProto(it) }
-        meshService.bluetoothConfig.value?.let { updateBluetoothFromProto(it) }
+        meshService.radioConfig.value?.let { if (!isDirty("lora")) updateLoraFromProto(it) }
+        meshService.deviceConfig.value?.let { if (!isDirty("device")) updateDeviceFromProto(it) }
+        meshService.positionConfig.value?.let { if (!isDirty("position")) updatePositionFromProto(it) }
+        meshService.powerConfig.value?.let { if (!isDirty("power")) updatePowerFromProto(it) }
+        meshService.networkConfig.value?.let { if (!isDirty("network")) updateNetworkFromProto(it) }
+        meshService.displayConfig.value?.let { if (!isDirty("display")) updateDisplayFromProto(it) }
+        meshService.bluetoothConfig.value?.let { if (!isDirty("bluetooth")) updateBluetoothFromProto(it) }
         meshService.owner.value?.let { user ->
-            _ownerState.value = OwnerUiState(
-                longName = user.longName,
-                shortName = user.shortName,
-                isLicensed = user.isLicensed
-            )
-        }
-        val chList = meshService.channels.value
-        if (chList.isNotEmpty()) {
-            _channelsState.value = chList.map { ch ->
-                ChannelUiState(
-                    index = ch.index,
-                    role = ch.role.let {
-                        if (it == MeshProtos.Channel.Role.UNRECOGNIZED) "PRIMARY" else it.name
-                    },
-                    name = if (ch.hasSettings()) ch.settings.name else "",
-                    pskHex = if (ch.hasSettings()) ch.settings.psk.toByteArray().toHex() else "",
-                    uplinkEnabled = if (ch.hasSettings()) ch.settings.uplinkEnabled else false,
-                    downlinkEnabled = if (ch.hasSettings()) ch.settings.downlinkEnabled else false
+            if (!isDirty("owner")) {
+                _ownerState.value = OwnerUiState(
+                    longName = user.longName,
+                    shortName = user.shortName,
+                    isLicensed = user.isLicensed
                 )
             }
+        }
+        val chList = meshService.channels.value
+        if (chList.isNotEmpty() && !isDirty("channels")) {
+            _channelsState.value = chList.map { mapChannel(it) }
         }
     }
 
     private fun updateLoraFromProto(lora: MeshProtos.Config.LoRaConfig) {
-        val regionName = lora.region.let {
-            if (it == MeshProtos.Config.LoRaConfig.RegionCode.UNRECOGNIZED) "UNSET" else it.name
-        }
-        val presetName = lora.modemPreset.let {
-            if (it == MeshProtos.Config.LoRaConfig.ModemPreset.UNRECOGNIZED) "LONG_FAST" else it.name
-        }
         _loraState.value = LoraUiState(
-            region = regionName,
-            modemPreset = presetName,
+            region = enumDisplay(lora.region, "UNSET"),
+            modemPreset = enumDisplay(lora.modemPreset, "LONG_FAST"),
             usePreset = lora.usePreset,
             bandwidth = lora.bandwidth,
             spreadFactor = lora.spreadFactor,
@@ -335,12 +325,12 @@ class ConfigViewModel(
 
     private fun updateDeviceFromProto(dev: MeshProtos.Config.DeviceConfig) {
         _deviceState.value = DeviceUiState(
-            role = dev.role.let { if (it == MeshProtos.Config.DeviceConfig.Role.UNRECOGNIZED) "CLIENT" else it.name },
+            role = enumDisplay(dev.role, "CLIENT"),
             serialEnabled = dev.serialEnabled,
             debugLogEnabled = dev.debugLogEnabled,
             buttonGpio = dev.buttonGpio,
             buzzerGpio = dev.buzzerGpio,
-            rebroadcastMode = dev.rebroadcastMode.let { if (it == MeshProtos.Config.DeviceConfig.RebroadcastMode.UNRECOGNIZED) "ALL" else it.name },
+            rebroadcastMode = enumDisplay(dev.rebroadcastMode, "ALL"),
             nodeInfoBroadcastSecs = dev.nodeInfoBroadcastSecs,
             doubleTapAsButtonPress = dev.doubleTapAsButtonPress,
             isManaged = dev.isManaged,
@@ -355,7 +345,7 @@ class ConfigViewModel(
             fixedPosition = pos.fixedPosition,
             gpsEnabled = pos.gpsEnabled,
             gpsUpdateInterval = pos.gpsUpdateInterval,
-            gpsMode = pos.gpsMode.let { if (it == MeshProtos.Config.PositionConfig.GpsMode.UNRECOGNIZED) "ENABLED" else it.name },
+            gpsMode = enumDisplay(pos.gpsMode, "ENABLED"),
             broadcastSmartMinimumDistance = pos.broadcastSmartMinimumDistance,
             broadcastSmartMinimumIntervalSecs = pos.broadcastSmartMinimumIntervalSecs
         )
@@ -380,7 +370,7 @@ class ConfigViewModel(
             wifiSsid = net.wifiSsid,
             wifiPsk = net.wifiPsk,
             ethEnabled = net.ethEnabled,
-            addressMode = net.addressMode.let { if (it == MeshProtos.Config.NetworkConfig.AddressMode.UNRECOGNIZED) "DHCP" else it.name },
+            addressMode = enumDisplay(net.addressMode, "DHCP"),
             ntpServer = net.ntpServer,
             rsyslogServer = net.rsyslogServer
         )
@@ -389,13 +379,13 @@ class ConfigViewModel(
     private fun updateDisplayFromProto(dsp: MeshProtos.Config.DisplayConfig) {
         _displayState.value = DisplayUiState(
             screenOnSecs = dsp.screenOnSecs,
-            gpsFormat = dsp.gpsFormat.let { if (it == MeshProtos.Config.DisplayConfig.GpsCoordinateFormat.UNRECOGNIZED) "DEC" else it.name },
+            gpsFormat = enumDisplay(dsp.gpsFormat, "DEC"),
             autoScreenCarouselSecs = dsp.autoScreenCarouselSecs,
             compassNorthTop = dsp.compassNorthTop,
             flipScreen = dsp.flipScreen,
-            units = dsp.units.let { if (it == MeshProtos.Config.DisplayConfig.DisplayUnits.UNRECOGNIZED) "METRIC" else it.name },
-            oled = dsp.oled.let { if (it == MeshProtos.Config.DisplayConfig.OledType.UNRECOGNIZED) "OLED_AUTO" else it.name },
-            displaymode = dsp.displaymode.let { if (it == MeshProtos.Config.DisplayConfig.DisplayMode.UNRECOGNIZED) "DEFAULT" else it.name },
+            units = enumDisplay(dsp.units, "METRIC"),
+            oled = enumDisplay(dsp.oled, "OLED_AUTO"),
+            displaymode = enumDisplay(dsp.displaymode, "DEFAULT"),
             headingBold = dsp.headingBold,
             wakeOnTapOrMotion = dsp.wakeOnTapOrMotion
         )
@@ -404,110 +394,116 @@ class ConfigViewModel(
     private fun updateBluetoothFromProto(bt: MeshProtos.Config.BluetoothConfig) {
         _bluetoothState.value = BluetoothUiState(
             enabled = bt.enabled,
-            mode = bt.mode.let { if (it == MeshProtos.Config.BluetoothConfig.PairingMode.UNRECOGNIZED) "RANDOM_PIN" else it.name },
+            mode = enumDisplay(bt.mode, "RANDOM_PIN"),
             fixedPin = bt.fixedPin
         )
     }
 
     // ========================  SETTERS  ========================
+    // Each setter marks its section dirty so subsequent device pushes don't
+    // overwrite the user's in-progress edits.
 
     // --- Owner ---
-    fun setOwnerLongName(name: String) { _ownerState.value = _ownerState.value.copy(longName = name) }
-    fun setOwnerShortName(name: String) { _ownerState.value = _ownerState.value.copy(shortName = name.take(4)) }
-    fun setOwnerIsLicensed(licensed: Boolean) { _ownerState.value = _ownerState.value.copy(isLicensed = licensed) }
+    fun setOwnerLongName(name: String) { markDirty("owner"); _ownerState.value = _ownerState.value.copy(longName = name) }
+    fun setOwnerShortName(name: String) { markDirty("owner"); _ownerState.value = _ownerState.value.copy(shortName = name.take(4)) }
+    fun setOwnerIsLicensed(licensed: Boolean) { markDirty("owner"); _ownerState.value = _ownerState.value.copy(isLicensed = licensed) }
 
     // --- LoRa ---
-    fun setLoraRegion(region: String) { _loraState.value = _loraState.value.copy(region = region) }
-    fun setLoraModemPreset(preset: String) { _loraState.value = _loraState.value.copy(modemPreset = preset) }
-    fun setLoraUsePreset(v: Boolean) { _loraState.value = _loraState.value.copy(usePreset = v) }
-    fun setLoraBandwidth(v: Int) { _loraState.value = _loraState.value.copy(bandwidth = v) }
-    fun setLoraSpreadFactor(v: Int) { _loraState.value = _loraState.value.copy(spreadFactor = v) }
-    fun setLoraCodingRate(v: Int) { _loraState.value = _loraState.value.copy(codingRate = v) }
-    fun setLoraFrequencyOffset(v: Float) { _loraState.value = _loraState.value.copy(frequencyOffset = v) }
-    fun setLoraHopLimit(v: Int) { _loraState.value = _loraState.value.copy(hopLimit = v.coerceIn(1, 7)) }
-    fun setLoraTxEnabled(v: Boolean) { _loraState.value = _loraState.value.copy(txEnabled = v) }
-    fun setLoraTxPower(v: Int) { _loraState.value = _loraState.value.copy(txPower = v) }
-    fun setLoraChannelNum(v: Int) { _loraState.value = _loraState.value.copy(channelNum = v) }
-    fun setLoraOverrideDutyCycle(v: Boolean) { _loraState.value = _loraState.value.copy(overrideDutyCycle = v) }
-    fun setLoraSx126xRxBoostedGain(v: Boolean) { _loraState.value = _loraState.value.copy(sx126xRxBoostedGain = v) }
-    fun setLoraOverrideFrequency(v: Float) { _loraState.value = _loraState.value.copy(overrideFrequency = v) }
-    fun setLoraIgnoreMqtt(v: Boolean) { _loraState.value = _loraState.value.copy(ignoreMqtt = v) }
+    fun setLoraRegion(region: String) { markDirty("lora"); _loraState.value = _loraState.value.copy(region = region) }
+    fun setLoraModemPreset(preset: String) { markDirty("lora"); _loraState.value = _loraState.value.copy(modemPreset = preset) }
+    fun setLoraUsePreset(v: Boolean) { markDirty("lora"); _loraState.value = _loraState.value.copy(usePreset = v) }
+    fun setLoraBandwidth(v: Int) { markDirty("lora"); _loraState.value = _loraState.value.copy(bandwidth = v) }
+    fun setLoraSpreadFactor(v: Int) { markDirty("lora"); _loraState.value = _loraState.value.copy(spreadFactor = v) }
+    fun setLoraCodingRate(v: Int) { markDirty("lora"); _loraState.value = _loraState.value.copy(codingRate = v) }
+    fun setLoraFrequencyOffset(v: Float) { markDirty("lora"); _loraState.value = _loraState.value.copy(frequencyOffset = v) }
+    fun setLoraHopLimit(v: Int) { markDirty("lora"); _loraState.value = _loraState.value.copy(hopLimit = v.coerceIn(1, 7)) }
+    fun setLoraTxEnabled(v: Boolean) { markDirty("lora"); _loraState.value = _loraState.value.copy(txEnabled = v) }
+    fun setLoraTxPower(v: Int) { markDirty("lora"); _loraState.value = _loraState.value.copy(txPower = v) }
+    fun setLoraChannelNum(v: Int) { markDirty("lora"); _loraState.value = _loraState.value.copy(channelNum = v) }
+    fun setLoraOverrideDutyCycle(v: Boolean) { markDirty("lora"); _loraState.value = _loraState.value.copy(overrideDutyCycle = v) }
+    fun setLoraSx126xRxBoostedGain(v: Boolean) { markDirty("lora"); _loraState.value = _loraState.value.copy(sx126xRxBoostedGain = v) }
+    fun setLoraOverrideFrequency(v: Float) { markDirty("lora"); _loraState.value = _loraState.value.copy(overrideFrequency = v) }
+    fun setLoraIgnoreMqtt(v: Boolean) { markDirty("lora"); _loraState.value = _loraState.value.copy(ignoreMqtt = v) }
 
     // --- Device ---
-    fun setDeviceRole(role: String) { _deviceState.value = _deviceState.value.copy(role = role) }
-    fun setDeviceSerialEnabled(v: Boolean) { _deviceState.value = _deviceState.value.copy(serialEnabled = v) }
-    fun setDeviceDebugLogEnabled(v: Boolean) { _deviceState.value = _deviceState.value.copy(debugLogEnabled = v) }
-    fun setDeviceButtonGpio(v: Int) { _deviceState.value = _deviceState.value.copy(buttonGpio = v) }
-    fun setDeviceBuzzerGpio(v: Int) { _deviceState.value = _deviceState.value.copy(buzzerGpio = v) }
-    fun setDeviceRebroadcastMode(mode: String) { _deviceState.value = _deviceState.value.copy(rebroadcastMode = mode) }
-    fun setDeviceNodeInfoBroadcastSecs(v: Int) { _deviceState.value = _deviceState.value.copy(nodeInfoBroadcastSecs = v) }
-    fun setDeviceDoubleTapAsButtonPress(v: Boolean) { _deviceState.value = _deviceState.value.copy(doubleTapAsButtonPress = v) }
-    fun setDeviceIsManaged(v: Boolean) { _deviceState.value = _deviceState.value.copy(isManaged = v) }
-    fun setDeviceDisableTripleClick(v: Boolean) { _deviceState.value = _deviceState.value.copy(disableTripleClick = v) }
+    fun setDeviceRole(role: String) { markDirty("device"); _deviceState.value = _deviceState.value.copy(role = role) }
+    fun setDeviceSerialEnabled(v: Boolean) { markDirty("device"); _deviceState.value = _deviceState.value.copy(serialEnabled = v) }
+    fun setDeviceDebugLogEnabled(v: Boolean) { markDirty("device"); _deviceState.value = _deviceState.value.copy(debugLogEnabled = v) }
+    fun setDeviceButtonGpio(v: Int) { markDirty("device"); _deviceState.value = _deviceState.value.copy(buttonGpio = v) }
+    fun setDeviceBuzzerGpio(v: Int) { markDirty("device"); _deviceState.value = _deviceState.value.copy(buzzerGpio = v) }
+    fun setDeviceRebroadcastMode(mode: String) { markDirty("device"); _deviceState.value = _deviceState.value.copy(rebroadcastMode = mode) }
+    fun setDeviceNodeInfoBroadcastSecs(v: Int) { markDirty("device"); _deviceState.value = _deviceState.value.copy(nodeInfoBroadcastSecs = v) }
+    fun setDeviceDoubleTapAsButtonPress(v: Boolean) { markDirty("device"); _deviceState.value = _deviceState.value.copy(doubleTapAsButtonPress = v) }
+    fun setDeviceIsManaged(v: Boolean) { markDirty("device"); _deviceState.value = _deviceState.value.copy(isManaged = v) }
+    fun setDeviceDisableTripleClick(v: Boolean) { markDirty("device"); _deviceState.value = _deviceState.value.copy(disableTripleClick = v) }
 
     // --- Position ---
-    fun setPositionBroadcastSecs(v: Int) { _positionState.value = _positionState.value.copy(positionBroadcastSecs = v) }
-    fun setPositionSmartEnabled(v: Boolean) { _positionState.value = _positionState.value.copy(positionBroadcastSmartEnabled = v) }
-    fun setPositionFixed(v: Boolean) { _positionState.value = _positionState.value.copy(fixedPosition = v) }
-    fun setPositionGpsEnabled(v: Boolean) { _positionState.value = _positionState.value.copy(gpsEnabled = v) }
-    fun setPositionGpsUpdateInterval(v: Int) { _positionState.value = _positionState.value.copy(gpsUpdateInterval = v) }
-    fun setPositionGpsMode(mode: String) { _positionState.value = _positionState.value.copy(gpsMode = mode) }
-    fun setPositionSmartMinDistance(v: Int) { _positionState.value = _positionState.value.copy(broadcastSmartMinimumDistance = v) }
-    fun setPositionSmartMinInterval(v: Int) { _positionState.value = _positionState.value.copy(broadcastSmartMinimumIntervalSecs = v) }
+    fun setPositionBroadcastSecs(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(positionBroadcastSecs = v) }
+    fun setPositionSmartEnabled(v: Boolean) { markDirty("position"); _positionState.value = _positionState.value.copy(positionBroadcastSmartEnabled = v) }
+    fun setPositionFixed(v: Boolean) { markDirty("position"); _positionState.value = _positionState.value.copy(fixedPosition = v) }
+    fun setPositionGpsEnabled(v: Boolean) { markDirty("position"); _positionState.value = _positionState.value.copy(gpsEnabled = v) }
+    fun setPositionGpsUpdateInterval(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(gpsUpdateInterval = v) }
+    fun setPositionGpsMode(mode: String) { markDirty("position"); _positionState.value = _positionState.value.copy(gpsMode = mode) }
+    fun setPositionSmartMinDistance(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(broadcastSmartMinimumDistance = v) }
+    fun setPositionSmartMinInterval(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(broadcastSmartMinimumIntervalSecs = v) }
 
     // --- Power ---
-    fun setPowerSaving(v: Boolean) { _powerState.value = _powerState.value.copy(isPowerSaving = v) }
-    fun setPowerShutdownAfterSecs(v: Int) { _powerState.value = _powerState.value.copy(onBatteryShutdownAfterSecs = v) }
-    fun setPowerAdcMultiplier(v: Float) { _powerState.value = _powerState.value.copy(adcMultiplierOverride = v) }
-    fun setPowerWaitBluetoothSecs(v: Int) { _powerState.value = _powerState.value.copy(waitBluetoothSecs = v) }
-    fun setPowerSdsSecs(v: Int) { _powerState.value = _powerState.value.copy(sdsSecs = v) }
-    fun setPowerLsSecs(v: Int) { _powerState.value = _powerState.value.copy(lsSecs = v) }
-    fun setPowerMinWakeSecs(v: Int) { _powerState.value = _powerState.value.copy(minWakeSecs = v) }
-    fun setPowerShutdownOnPowerLoss(v: Boolean) { _powerState.value = _powerState.value.copy(shutdownOnPowerLoss = v) }
+    fun setPowerSaving(v: Boolean) { markDirty("power"); _powerState.value = _powerState.value.copy(isPowerSaving = v) }
+    fun setPowerShutdownAfterSecs(v: Int) { markDirty("power"); _powerState.value = _powerState.value.copy(onBatteryShutdownAfterSecs = v) }
+    fun setPowerAdcMultiplier(v: Float) { markDirty("power"); _powerState.value = _powerState.value.copy(adcMultiplierOverride = v) }
+    fun setPowerWaitBluetoothSecs(v: Int) { markDirty("power"); _powerState.value = _powerState.value.copy(waitBluetoothSecs = v) }
+    fun setPowerSdsSecs(v: Int) { markDirty("power"); _powerState.value = _powerState.value.copy(sdsSecs = v) }
+    fun setPowerLsSecs(v: Int) { markDirty("power"); _powerState.value = _powerState.value.copy(lsSecs = v) }
+    fun setPowerMinWakeSecs(v: Int) { markDirty("power"); _powerState.value = _powerState.value.copy(minWakeSecs = v) }
+    fun setPowerShutdownOnPowerLoss(v: Boolean) { markDirty("power"); _powerState.value = _powerState.value.copy(shutdownOnPowerLoss = v) }
 
     // --- Network ---
-    fun setNetworkWifiEnabled(v: Boolean) { _networkState.value = _networkState.value.copy(wifiEnabled = v) }
-    fun setNetworkWifiSsid(v: String) { _networkState.value = _networkState.value.copy(wifiSsid = v) }
-    fun setNetworkWifiPsk(v: String) { _networkState.value = _networkState.value.copy(wifiPsk = v) }
-    fun setNetworkEthEnabled(v: Boolean) { _networkState.value = _networkState.value.copy(ethEnabled = v) }
-    fun setNetworkAddressMode(mode: String) { _networkState.value = _networkState.value.copy(addressMode = mode) }
-    fun setNetworkNtpServer(v: String) { _networkState.value = _networkState.value.copy(ntpServer = v) }
-    fun setNetworkRsyslogServer(v: String) { _networkState.value = _networkState.value.copy(rsyslogServer = v) }
+    fun setNetworkWifiEnabled(v: Boolean) { markDirty("network"); _networkState.value = _networkState.value.copy(wifiEnabled = v) }
+    fun setNetworkWifiSsid(v: String) { markDirty("network"); _networkState.value = _networkState.value.copy(wifiSsid = v) }
+    fun setNetworkWifiPsk(v: String) { markDirty("network"); _networkState.value = _networkState.value.copy(wifiPsk = v) }
+    fun setNetworkEthEnabled(v: Boolean) { markDirty("network"); _networkState.value = _networkState.value.copy(ethEnabled = v) }
+    fun setNetworkAddressMode(mode: String) { markDirty("network"); _networkState.value = _networkState.value.copy(addressMode = mode) }
+    fun setNetworkNtpServer(v: String) { markDirty("network"); _networkState.value = _networkState.value.copy(ntpServer = v) }
+    fun setNetworkRsyslogServer(v: String) { markDirty("network"); _networkState.value = _networkState.value.copy(rsyslogServer = v) }
 
     // --- Display ---
-    fun setDisplayScreenOnSecs(v: Int) { _displayState.value = _displayState.value.copy(screenOnSecs = v) }
-    fun setDisplayGpsFormat(v: String) { _displayState.value = _displayState.value.copy(gpsFormat = v) }
-    fun setDisplayAutoCarouselSecs(v: Int) { _displayState.value = _displayState.value.copy(autoScreenCarouselSecs = v) }
-    fun setDisplayCompassNorthTop(v: Boolean) { _displayState.value = _displayState.value.copy(compassNorthTop = v) }
-    fun setDisplayFlipScreen(v: Boolean) { _displayState.value = _displayState.value.copy(flipScreen = v) }
-    fun setDisplayUnits(v: String) { _displayState.value = _displayState.value.copy(units = v) }
-    fun setDisplayOled(v: String) { _displayState.value = _displayState.value.copy(oled = v) }
-    fun setDisplayMode(v: String) { _displayState.value = _displayState.value.copy(displaymode = v) }
-    fun setDisplayHeadingBold(v: Boolean) { _displayState.value = _displayState.value.copy(headingBold = v) }
-    fun setDisplayWakeOnTapOrMotion(v: Boolean) { _displayState.value = _displayState.value.copy(wakeOnTapOrMotion = v) }
+    fun setDisplayScreenOnSecs(v: Int) { markDirty("display"); _displayState.value = _displayState.value.copy(screenOnSecs = v) }
+    fun setDisplayGpsFormat(v: String) { markDirty("display"); _displayState.value = _displayState.value.copy(gpsFormat = v) }
+    fun setDisplayAutoCarouselSecs(v: Int) { markDirty("display"); _displayState.value = _displayState.value.copy(autoScreenCarouselSecs = v) }
+    fun setDisplayCompassNorthTop(v: Boolean) { markDirty("display"); _displayState.value = _displayState.value.copy(compassNorthTop = v) }
+    fun setDisplayFlipScreen(v: Boolean) { markDirty("display"); _displayState.value = _displayState.value.copy(flipScreen = v) }
+    fun setDisplayUnits(v: String) { markDirty("display"); _displayState.value = _displayState.value.copy(units = v) }
+    fun setDisplayOled(v: String) { markDirty("display"); _displayState.value = _displayState.value.copy(oled = v) }
+    fun setDisplayMode(v: String) { markDirty("display"); _displayState.value = _displayState.value.copy(displaymode = v) }
+    fun setDisplayHeadingBold(v: Boolean) { markDirty("display"); _displayState.value = _displayState.value.copy(headingBold = v) }
+    fun setDisplayWakeOnTapOrMotion(v: Boolean) { markDirty("display"); _displayState.value = _displayState.value.copy(wakeOnTapOrMotion = v) }
 
     // --- Bluetooth ---
-    fun setBluetoothEnabled(v: Boolean) { _bluetoothState.value = _bluetoothState.value.copy(enabled = v) }
-    fun setBluetoothMode(mode: String) { _bluetoothState.value = _bluetoothState.value.copy(mode = mode) }
-    fun setBluetoothFixedPin(v: Int) { _bluetoothState.value = _bluetoothState.value.copy(fixedPin = v) }
+    fun setBluetoothEnabled(v: Boolean) { markDirty("bluetooth"); _bluetoothState.value = _bluetoothState.value.copy(enabled = v) }
+    fun setBluetoothMode(mode: String) { markDirty("bluetooth"); _bluetoothState.value = _bluetoothState.value.copy(mode = mode) }
+    fun setBluetoothFixedPin(v: Int) { markDirty("bluetooth"); _bluetoothState.value = _bluetoothState.value.copy(fixedPin = v) }
 
     // --- Channel ---
     fun setChannelName(index: Int, name: String) {
+        markDirty("channels")
         _channelsState.value = _channelsState.value.map {
             if (it.index == index) it.copy(name = name) else it
         }
     }
     fun setChannelPskHex(index: Int, hex: String) {
+        markDirty("channels")
         _channelsState.value = _channelsState.value.map {
             if (it.index == index) it.copy(pskHex = hex) else it
         }
     }
     fun setChannelUplink(index: Int, v: Boolean) {
+        markDirty("channels")
         _channelsState.value = _channelsState.value.map {
             if (it.index == index) it.copy(uplinkEnabled = v) else it
         }
     }
     fun setChannelDownlink(index: Int, v: Boolean) {
+        markDirty("channels")
         _channelsState.value = _channelsState.value.map {
             if (it.index == index) it.copy(downlinkEnabled = v) else it
         }
@@ -531,19 +527,42 @@ class ConfigViewModel(
 
     fun applyOwner() {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (meshService.owner.value == null) {
+            _configStatus.value = "Owner not yet loaded — refresh first"
+            return
+        }
         val s = _ownerState.value
+        if (s.longName.isBlank() || s.shortName.isBlank()) {
+            _configStatus.value = "Long/short name cannot be empty"
+            return
+        }
         val user = MeshProtos.User.newBuilder()
             .setLongName(s.longName)
             .setShortName(s.shortName)
             .setIsLicensed(s.isLicensed)
             .build()
         val ok = meshService.writeOwner(user)
+        if (ok) dirty.remove("owner")
         _configStatus.value = if (ok) "Owner config sent" else "Failed to send owner config"
     }
 
     fun applyLoraConfig() {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (meshService.radioConfig.value == null) {
+            _configStatus.value = "LoRa config not yet loaded from device — refresh first"
+            return
+        }
         val s = _loraState.value
+        // Refuse obviously dangerous combinations that can crash the radio task
+        // on the firmware (and bootloop the device).
+        if (s.region.startsWith("UNSET") || s.region.contains("unknown")) {
+            _configStatus.value = "Refusing to write: pick a real region first"
+            return
+        }
+        if (!s.usePreset && (s.bandwidth == 0 || s.spreadFactor == 0 || s.codingRate == 0)) {
+            _configStatus.value = "Refusing to write: bandwidth / SF / CR cannot be zero when not using a preset"
+            return
+        }
         try {
             val regionEnum = try {
                 MeshProtos.Config.LoRaConfig.RegionCode.valueOf(s.region)
@@ -574,6 +593,7 @@ class ConfigViewModel(
                 .build()
             val config = MeshProtos.Config.newBuilder().setLora(lora).build()
             val ok = meshService.writeConfig(config)
+            if (ok) dirty.remove("lora")
             _configStatus.value = if (ok) "LoRa config sent" else "Failed to send LoRa config"
         } catch (e: Exception) {
             _configStatus.value = "Error: ${e.message}"
@@ -582,14 +602,17 @@ class ConfigViewModel(
 
     fun applyDeviceConfig() {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (meshService.deviceConfig.value == null) {
+            _configStatus.value = "Device config not yet loaded — refresh first"; return
+        }
         val s = _deviceState.value
         val dev = MeshProtos.Config.DeviceConfig.newBuilder()
-            .setRole(MeshProtos.Config.DeviceConfig.Role.valueOf(s.role))
+            .setRole(safeEnum(MeshProtos.Config.DeviceConfig.Role::valueOf, s.role, MeshProtos.Config.DeviceConfig.Role.CLIENT))
             .setSerialEnabled(s.serialEnabled)
             .setDebugLogEnabled(s.debugLogEnabled)
             .setButtonGpio(s.buttonGpio)
             .setBuzzerGpio(s.buzzerGpio)
-            .setRebroadcastMode(MeshProtos.Config.DeviceConfig.RebroadcastMode.valueOf(s.rebroadcastMode))
+            .setRebroadcastMode(safeEnum(MeshProtos.Config.DeviceConfig.RebroadcastMode::valueOf, s.rebroadcastMode, MeshProtos.Config.DeviceConfig.RebroadcastMode.ALL))
             .setNodeInfoBroadcastSecs(s.nodeInfoBroadcastSecs)
             .setDoubleTapAsButtonPress(s.doubleTapAsButtonPress)
             .setIsManaged(s.isManaged)
@@ -597,11 +620,15 @@ class ConfigViewModel(
             .build()
         val config = MeshProtos.Config.newBuilder().setDevice(dev).build()
         val ok = meshService.writeConfig(config)
+        if (ok) dirty.remove("device")
         _configStatus.value = if (ok) "Device config sent" else "Failed to send device config"
     }
 
     fun applyPositionConfig() {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (meshService.positionConfig.value == null) {
+            _configStatus.value = "Position config not yet loaded — refresh first"; return
+        }
         val s = _positionState.value
         val pos = MeshProtos.Config.PositionConfig.newBuilder()
             .setPositionBroadcastSecs(s.positionBroadcastSecs)
@@ -609,17 +636,21 @@ class ConfigViewModel(
             .setFixedPosition(s.fixedPosition)
             .setGpsEnabled(s.gpsEnabled)
             .setGpsUpdateInterval(s.gpsUpdateInterval)
-            .setGpsMode(MeshProtos.Config.PositionConfig.GpsMode.valueOf(s.gpsMode))
+            .setGpsMode(safeEnum(MeshProtos.Config.PositionConfig.GpsMode::valueOf, s.gpsMode, MeshProtos.Config.PositionConfig.GpsMode.ENABLED))
             .setBroadcastSmartMinimumDistance(s.broadcastSmartMinimumDistance)
             .setBroadcastSmartMinimumIntervalSecs(s.broadcastSmartMinimumIntervalSecs)
             .build()
         val config = MeshProtos.Config.newBuilder().setPosition(pos).build()
         val ok = meshService.writeConfig(config)
+        if (ok) dirty.remove("position")
         _configStatus.value = if (ok) "Position config sent" else "Failed to send position config"
     }
 
     fun applyPowerConfig() {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (meshService.powerConfig.value == null) {
+            _configStatus.value = "Power config not yet loaded — refresh first"; return
+        }
         val s = _powerState.value
         val pwr = MeshProtos.Config.PowerConfig.newBuilder()
             .setIsPowerSaving(s.isPowerSaving)
@@ -633,61 +664,77 @@ class ConfigViewModel(
             .build()
         val config = MeshProtos.Config.newBuilder().setPower(pwr).build()
         val ok = meshService.writeConfig(config)
+        if (ok) dirty.remove("power")
         _configStatus.value = if (ok) "Power config sent" else "Failed to send power config"
     }
 
     fun applyNetworkConfig() {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (meshService.networkConfig.value == null) {
+            _configStatus.value = "Network config not yet loaded — refresh first"; return
+        }
         val s = _networkState.value
         val net = MeshProtos.Config.NetworkConfig.newBuilder()
             .setWifiEnabled(s.wifiEnabled)
             .setWifiSsid(s.wifiSsid)
             .setWifiPsk(s.wifiPsk)
             .setEthEnabled(s.ethEnabled)
-            .setAddressMode(MeshProtos.Config.NetworkConfig.AddressMode.valueOf(s.addressMode))
+            .setAddressMode(safeEnum(MeshProtos.Config.NetworkConfig.AddressMode::valueOf, s.addressMode, MeshProtos.Config.NetworkConfig.AddressMode.DHCP))
             .setNtpServer(s.ntpServer)
             .setRsyslogServer(s.rsyslogServer)
             .build()
         val config = MeshProtos.Config.newBuilder().setNetwork(net).build()
         val ok = meshService.writeConfig(config)
+        if (ok) dirty.remove("network")
         _configStatus.value = if (ok) "Network config sent" else "Failed to send network config"
     }
 
     fun applyDisplayConfig() {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (meshService.displayConfig.value == null) {
+            _configStatus.value = "Display config not yet loaded — refresh first"; return
+        }
         val s = _displayState.value
         val dsp = MeshProtos.Config.DisplayConfig.newBuilder()
             .setScreenOnSecs(s.screenOnSecs)
-            .setGpsFormat(MeshProtos.Config.DisplayConfig.GpsCoordinateFormat.valueOf(s.gpsFormat))
+            .setGpsFormat(safeEnum(MeshProtos.Config.DisplayConfig.GpsCoordinateFormat::valueOf, s.gpsFormat, MeshProtos.Config.DisplayConfig.GpsCoordinateFormat.DEC))
             .setAutoScreenCarouselSecs(s.autoScreenCarouselSecs)
             .setCompassNorthTop(s.compassNorthTop)
             .setFlipScreen(s.flipScreen)
-            .setUnits(MeshProtos.Config.DisplayConfig.DisplayUnits.valueOf(s.units))
-            .setOled(MeshProtos.Config.DisplayConfig.OledType.valueOf(s.oled))
-            .setDisplaymode(MeshProtos.Config.DisplayConfig.DisplayMode.valueOf(s.displaymode))
+            .setUnits(safeEnum(MeshProtos.Config.DisplayConfig.DisplayUnits::valueOf, s.units, MeshProtos.Config.DisplayConfig.DisplayUnits.METRIC))
+            .setOled(safeEnum(MeshProtos.Config.DisplayConfig.OledType::valueOf, s.oled, MeshProtos.Config.DisplayConfig.OledType.OLED_AUTO))
+            .setDisplaymode(safeEnum(MeshProtos.Config.DisplayConfig.DisplayMode::valueOf, s.displaymode, MeshProtos.Config.DisplayConfig.DisplayMode.DEFAULT))
             .setHeadingBold(s.headingBold)
             .setWakeOnTapOrMotion(s.wakeOnTapOrMotion)
             .build()
         val config = MeshProtos.Config.newBuilder().setDisplay(dsp).build()
         val ok = meshService.writeConfig(config)
+        if (ok) dirty.remove("display")
         _configStatus.value = if (ok) "Display config sent" else "Failed to send display config"
     }
 
     fun applyBluetoothConfig() {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (meshService.bluetoothConfig.value == null) {
+            _configStatus.value = "Bluetooth config not yet loaded — refresh first"; return
+        }
         val s = _bluetoothState.value
         val bt = MeshProtos.Config.BluetoothConfig.newBuilder()
             .setEnabled(s.enabled)
-            .setMode(MeshProtos.Config.BluetoothConfig.PairingMode.valueOf(s.mode))
+            .setMode(safeEnum(MeshProtos.Config.BluetoothConfig.PairingMode::valueOf, s.mode, MeshProtos.Config.BluetoothConfig.PairingMode.RANDOM_PIN))
             .setFixedPin(s.fixedPin)
             .build()
         val config = MeshProtos.Config.newBuilder().setBluetooth(bt).build()
         val ok = meshService.writeConfig(config)
+        if (ok) dirty.remove("bluetooth")
         _configStatus.value = if (ok) "Bluetooth config sent" else "Failed to send bluetooth config"
     }
 
     fun applyChannel(index: Int) {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (meshService.channels.value.isEmpty()) {
+            _configStatus.value = "Channels not yet loaded — refresh first"; return
+        }
         val chUi = _channelsState.value.find { it.index == index } ?: return
         val settings = MeshProtos.ChannelSettings.newBuilder()
             .setName(chUi.name)
@@ -698,9 +745,10 @@ class ConfigViewModel(
         val channel = MeshProtos.Channel.newBuilder()
             .setIndex(index)
             .setSettings(settings)
-            .setRole(MeshProtos.Channel.Role.valueOf(chUi.role))
+            .setRole(safeEnum(MeshProtos.Channel.Role::valueOf, chUi.role, MeshProtos.Channel.Role.PRIMARY))
             .build()
         val ok = meshService.writeChannel(channel)
+        if (ok) dirty.remove("channels")
         _configStatus.value = if (ok) "Channel $index config sent" else "Failed to send channel config"
     }
 
@@ -708,14 +756,11 @@ class ConfigViewModel(
 
     fun refreshDeviceConfig() {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        clearDirty()
         meshService.refreshConfig()
-        _configStatus.value = "Config refresh requested"
-        // Sync after allowing time for device to respond
-        viewModelScope.launch {
-            kotlinx.coroutines.delay(2000)
-            syncFromServiceFlows()
-            _configStatus.value = "Config refreshed"
-        }
+        _configStatus.value = "Config refresh requested…"
+        // syncFromServiceFlows() will be triggered automatically by the
+        // configComplete signal from MeshServiceManager.
     }
 
     fun rebootDevice() {
@@ -741,4 +786,25 @@ class ConfigViewModel(
         if (clean.isEmpty()) return byteArrayOf()
         return clean.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
     }
+
+    /** Generic display helper for proto enums: returns the enum name, or
+     *  "<fallback> (#<rawNumber>)" if the firmware sent a value our proto doesn't know about. */
+    private fun <E : Enum<E>> enumDisplay(value: E, fallback: String): String {
+        return if (value.name == "UNRECOGNIZED") {
+            // Try to extract the numeric value via reflection (proto3 enums expose .number via getNumber())
+            val number = try {
+                value.javaClass.getMethod("getNumber").invoke(value) as? Int
+            } catch (_: Exception) { null }
+            if (number != null) "$fallback (unknown #$number)" else fallback
+        } else value.name
+    }
+
+    /** Returns the names of all enum values except UNRECOGNIZED. */
+    private fun <E : Enum<E>> enumNames(values: Array<E>): List<String> =
+        values.filter { it.name != "UNRECOGNIZED" }.map { it.name }
+
+    /** Safely parse an enum name, returning [fallback] if the user has selected the
+     *  synthetic "(unknown #N)" placeholder or an unknown name. */
+    private fun <E : Enum<E>> safeEnum(parser: (String) -> E, name: String, fallback: E): E =
+        try { parser(name) } catch (_: IllegalArgumentException) { fallback }
 }
