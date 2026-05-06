@@ -109,6 +109,9 @@ dependencies {
     // Protobuf
     implementation(libs.protobuf.javalite)
 
+    // USB serial (Meshtastic over USB host)
+    implementation(libs.usb.serial)
+
     // Unit tests (Kotest + Cucumber)
     testImplementation(libs.junit)
     testImplementation(libs.kotest.runner)

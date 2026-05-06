@@ -7,10 +7,12 @@ import android.bluetooth.le.ScanFilter
 import android.bluetooth.le.ScanResult
 import android.bluetooth.le.ScanSettings
 import android.content.Context
+import android.hardware.usb.UsbDevice
 import android.os.ParcelUuid
 import android.util.Log
 import com.geeksville.mesh.MeshProtos
 import com.geeksville.mesh.Portnums.PortNum
+import com.hoho.android.usbserial.driver.UsbSerialDriver
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.sync.Mutex
@@ -75,6 +77,142 @@ class MeshServiceManager(private val context: Context) {
 
     private val _isScanning = MutableStateFlow(false)
     val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
+
+    // ==========  USB TRANSPORT  ==========
+    //
+    // BLE remains the default; USB runs alongside as an alternative transport
+    // for Meshtastic nodes connected via a USB-OTG cable. Only one transport
+    // is active at a time. When `usbActive` is true, writeToRadio() goes out
+    // over USB and BLE writes are short-circuited.
+
+    enum class TransportType { NONE, BLE, USB }
+
+    private val usbTransport: UsbMeshTransport = UsbMeshTransport(context)
+    private var usbActive: Boolean = false
+
+    val usbState: StateFlow<UsbMeshTransport.State> = usbTransport.state
+    val usbConnectedDevice: StateFlow<UsbDevice?> = usbTransport.connectedDevice
+    val usbErrors: SharedFlow<String> = usbTransport.errors
+
+    private val _activeTransport = MutableStateFlow(TransportType.NONE)
+    val activeTransport: StateFlow<TransportType> = _activeTransport.asStateFlow()
+
+    init {
+        // Forward inbound `FromRadio` payloads from USB into the same
+        // protocol pipeline used by BLE.
+        scope.launch {
+            usbTransport.incomingFromRadio.collect { bytes ->
+                try {
+                    val fromRadio = MeshProtos.FromRadio.parseFrom(bytes)
+                    handleFromRadio(fromRadio)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to parse FromRadio from USB (${bytes.size} B)", e)
+                }
+            }
+        }
+        // Mirror USB connection state onto the unified _connectionState so
+        // existing UI keeps working without a second status indicator.
+        scope.launch {
+            usbTransport.state.collect { st ->
+                if (!usbActive) return@collect
+                _connectionState.value = when (st) {
+                    UsbMeshTransport.State.CONNECTED -> "CONNECTED"
+                    UsbMeshTransport.State.CONNECTING -> "CONNECTING"
+                    UsbMeshTransport.State.ERROR -> {
+                        // Transport-level failure (e.g. cable unplugged mid-IO).
+                        // Clear caches so the UI doesn't show stale data from
+                        // the now-gone radio.
+                        usbActive = false
+                        _activeTransport.value = TransportType.NONE
+                        clearSessionState()
+                        "DISCONNECTED"
+                    }
+                    UsbMeshTransport.State.DISCONNECTED -> {
+                        // USB went away — clear the active flag and wipe
+                        // per-session caches so a re-attach starts fresh.
+                        usbActive = false
+                        _activeTransport.value = TransportType.NONE
+                        clearSessionState()
+                        "DISCONNECTED"
+                    }
+                }
+                if (st == UsbMeshTransport.State.CONNECTED) {
+                    // No settle delay needed for USB — the port is already
+                    // open and DTR/RTS asserted by the time we get here.
+                    requestConfig()
+                }
+            }
+        }
+    }
+
+    /** Enumerate USB serial drivers that look like Meshtastic devices. */
+    fun discoverUsbDevices(): List<UsbSerialDriver> = usbTransport.discoverDevices()
+
+    fun usbHasPermission(device: UsbDevice): Boolean = usbTransport.hasPermission(device)
+
+    fun requestUsbPermission(device: UsbDevice, onResult: (Boolean) -> Unit) =
+        usbTransport.requestPermission(device, onResult)
+
+    /**
+     * Connect over USB. If a BLE link is currently active it is dropped first
+     * (only one transport at a time).
+     *
+     * @return true if the open succeeded.
+     */
+    fun connectUsb(driver: UsbSerialDriver): Boolean {
+        if (bluetoothGatt != null) {
+            Log.i(TAG, "Switching from BLE to USB transport")
+            disconnectBle()
+        }
+        usbActive = true
+        _activeTransport.value = TransportType.USB
+        val ok = usbTransport.connect(driver)
+        if (!ok) {
+            usbActive = false
+            _activeTransport.value = TransportType.NONE
+        }
+        return ok
+    }
+
+    fun disconnectUsb() {
+        usbTransport.disconnect()
+        usbActive = false
+        _activeTransport.value = TransportType.NONE
+        // Mirror disconnectBle(): drop per-session state so a subsequent
+        // attach (possibly to a different node) starts from a clean slate.
+        // Without this, myNodeNum / cached configs from a prior session
+        // leak across reconnects and break sendAdminMessage()'s gate
+        // (`!isConnected || myNodeNum == 0`) → "Failed to send …".
+        clearSessionState()
+        _connectionState.value = "DISCONNECTED"
+        Log.i(TAG, "Disconnected (USB)")
+    }
+
+    /**
+     * Per-connection node/config caches. Cleared on either transport tearing down
+     * so that the next connection (possibly to a different physical radio) starts
+     * from a known state.
+     */
+    private fun clearSessionState() {
+        myNodeNum = 0
+        _myNodeId.value = null
+        _firmwareVersion.value = null
+        nodeMap.clear()
+        _nodes.value = emptyList()
+        _radioConfig.value = null
+        _deviceConfig.value = null
+        _positionConfig.value = null
+        _powerConfig.value = null
+        _networkConfig.value = null
+        _displayConfig.value = null
+        _bluetoothConfig.value = null
+        _channels.value = emptyList()
+        _owner.value = null
+        _moduleConfigs.value = emptyMap()
+    }
+
+    /** Notify when the OS reports a USB device was unplugged. */
+    fun onUsbDeviceDetached(device: UsbDevice) = usbTransport.onDeviceDetached(device)
 
     // --- Per-section config flows ---
     private val _radioConfig = MutableStateFlow<MeshProtos.Config.LoRaConfig?>(null)
@@ -173,6 +311,9 @@ class MeshServiceManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun connect(device: BluetoothDevice) {
+        // BLE and USB are mutually exclusive — drop USB if it was active.
+        if (usbActive) disconnectUsb()
+        _activeTransport.value = TransportType.BLE
         stopScan()
         _connectionState.value = "CONNECTING"
         Log.i(TAG, "Connecting to ${device.name ?: device.address}")
@@ -183,6 +324,13 @@ class MeshServiceManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun disconnect() {
+        // Tear down whichever transport is active.
+        if (usbActive) disconnectUsb()
+        disconnectBle()
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun disconnectBle() {
         stopPolling()
         setupCompleted = false
         try { bluetoothGatt?.disconnect() } catch (_: Exception) {}
@@ -190,29 +338,19 @@ class MeshServiceManager(private val context: Context) {
         bluetoothGatt = null
         toRadioChar = null
         fromRadioChar = null
+        if (_activeTransport.value == TransportType.BLE) {
+            _activeTransport.value = TransportType.NONE
+        }
         _connectionState.value = "DISCONNECTED"
-        myNodeNum = 0
-        _myNodeId.value = null
-        _firmwareVersion.value = null
-        nodeMap.clear()
-        _nodes.value = emptyList()
-        _radioConfig.value = null
-        _deviceConfig.value = null
-        _positionConfig.value = null
-        _powerConfig.value = null
-        _networkConfig.value = null
-        _displayConfig.value = null
-        _bluetoothConfig.value = null
-        _channels.value = emptyList()
-        _owner.value = null
-        _moduleConfigs.value = emptyMap()
-        Log.i(TAG, "Disconnected")
+        clearSessionState()
+        Log.i(TAG, "Disconnected (BLE)")
     }
 
     fun unbind() = disconnect()
 
     fun destroy() {
         disconnect()
+        usbTransport.destroy()
         scope.cancel()
     }
 
@@ -465,8 +603,21 @@ class MeshServiceManager(private val context: Context) {
         val toRadio = MeshProtos.ToRadio.newBuilder()
             .setWantConfigId(configId)
             .build()
+        // On USB, re-arm protocol mode before each refresh: the firmware
+        // can have lapsed back into debug-log output if it's been idle for
+        // a while or rebooted spontaneously, in which case `want_config_id`
+        // would be silently swallowed. The wake sequence is a no-op when
+        // the device is already in protocol mode, so it's always safe.
+        if (usbActive) usbTransport.wake()
         writeToRadio(toRadio)
-        // Drain whatever the firmware queued in response.
+        // USB is push-driven: FromRadio bytes stream in via the SerialIo
+        // listener and land in handleFromRadio() as soon as the firmware
+        // emits them. No polling needed → returning here makes refresh
+        // feel instant instead of waiting ~2s for BLE-style drains that
+        // would all be no-ops (readAllFromRadio short-circuits when gatt
+        // is null).
+        if (usbActive) return
+        // BLE: drain whatever the firmware queued in response.
         delay(500)
         readAllFromRadio()
         // Some firmwares enqueue the burst lazily; do a couple more drains.
@@ -708,14 +859,23 @@ class MeshServiceManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     private suspend fun writeToRadio(toRadio: MeshProtos.ToRadio) {
+        val bytes = toRadio.toByteArray()
+
+        // USB path: synchronous-ish framed write, no GATT semaphores needed.
+        if (usbActive) {
+            val ok = usbTransport.write(bytes)
+            if (!ok) Log.w(TAG, "USB writeToRadio failed (${bytes.size} bytes)")
+            else Log.d(TAG, "USB ToRadio write success (${bytes.size} bytes)")
+            return
+        }
+
         val gatt = bluetoothGatt ?: return
         val char = toRadioChar ?: return
-        val bytes = toRadio.toByteArray()
 
         bleMutex.withLock {
             writeSemaphore.drainPermits()
             val initiated = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothGatt.GATT_SUCCESS
+                gatt.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
             } else {
                 @Suppress("DEPRECATION")
                 char.value = bytes
@@ -805,7 +965,19 @@ class MeshServiceManager(private val context: Context) {
     // ==========  ADMIN CONFIG WRITES (local node only)  ==========
 
     private fun sendAdminMessage(admin: MeshProtos.AdminMessage): Boolean {
-        if (!isConnected || myNodeNum == 0) return false
+        if (!isConnected) {
+            Log.w(TAG, "sendAdminMessage refused: not connected (state=${_connectionState.value}, transport=${_activeTransport.value})")
+            return false
+        }
+        if (myNodeNum == 0) {
+            // We're connected but the firmware never reported MyNodeInfo (or
+            // we lost it on a transport switch). Without a destination node
+            // number the admin packet has nowhere to go. Kick a refresh so
+            // the next attempt has a chance to succeed.
+            Log.w(TAG, "sendAdminMessage refused: myNodeNum=0 — re-requesting config")
+            scope.launch { requestConfig() }
+            return false
+        }
 
         val data = MeshProtos.Data.newBuilder()
             .setPortnum(PortNum.ADMIN_APP)

@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+    <!-- USB host (used to talk to a Meshtastic node over a USB serial cable). -->
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <application
         android:allowBackup="true"
@@ -33,6 +35,14 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!--
+              USB auto-launch was intentionally removed: the user picks the
+              transport (BLE or USB) manually from the Devices screen, so
+              we do NOT want plugging in a serial cable to bring the app
+              to the foreground or hijack focus from another app.
+              The DeviceScreen still re-enumerates USB drivers so a freshly
+              plugged radio appears in the list immediately.
+            -->
         </activity>
     </application>
 

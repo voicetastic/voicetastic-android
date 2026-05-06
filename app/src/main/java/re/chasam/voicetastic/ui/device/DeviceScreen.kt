@@ -12,24 +12,50 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import com.hoho.android.usbserial.driver.UsbSerialDriver
 import re.chasam.voicetastic.service.MeshServiceManager
 
+/**
+ * One screen, one list. USB and Bluetooth Meshtastic devices appear in the
+ * same "Available Devices" list — the user picks whichever is closest to
+ * hand. The active transport is reported in the status card at the top.
+ */
 @SuppressLint("MissingPermission")
 @Composable
 fun DeviceScreen(meshServiceManager: MeshServiceManager) {
-    val devices by meshServiceManager.discoveredDevices.collectAsState()
+    val bleDevices by meshServiceManager.discoveredDevices.collectAsState()
     val isScanning by meshServiceManager.isScanning.collectAsState()
     val connectionState by meshServiceManager.connectionState.collectAsState()
     val myNodeId by meshServiceManager.myNodeId.collectAsState()
     val nodes by meshServiceManager.nodes.collectAsState()
+    val activeTransport by meshServiceManager.activeTransport.collectAsState()
+    val usbDeviceConnected by meshServiceManager.usbConnectedDevice.collectAsState()
+
+    // USB hot-plug events arrive through the OS broadcast pipeline, but we
+    // also re-enumerate whenever something interesting happens on screen so
+    // the list stays accurate even if the broadcast is missed.
+    var usbDrivers by remember { mutableStateOf<List<UsbSerialDriver>>(emptyList()) }
+    LaunchedEffect(usbDeviceConnected, connectionState, isScanning) {
+        usbDrivers = meshServiceManager.discoverUsbDevices()
+    }
+
+    // Build the unified entry list (USB first — when a cable is plugged in
+    // the user's intent is usually "talk to that one").
+    val entries: List<DeviceEntry> = remember(usbDrivers, bleDevices) {
+        buildList {
+            usbDrivers.forEach { add(DeviceEntry.Usb(it)) }
+            bleDevices.forEach { add(DeviceEntry.Ble(it)) }
+        }
+    }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        // Connection status
+        // ===== Connection status =====
         Card(
             colors = CardDefaults.cardColors(
                 containerColor = when (connectionState) {
@@ -51,10 +77,17 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
                 )
                 if (connectionState == "CONNECTED") {
                     myNodeId?.let { Text("My ID: $it", style = MaterialTheme.typography.bodySmall) }
-                    Text("${nodes.size} nodes discovered", style = MaterialTheme.typography.bodySmall)
+                    Text(
+                        "Transport: ${activeTransport.name}",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Text(
+                        "${nodes.size} nodes discovered",
+                        style = MaterialTheme.typography.bodySmall
+                    )
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(onClick = { meshServiceManager.disconnect() }) {
-                        Icon(Icons.Default.BluetoothDisabled, contentDescription = null)
+                        Icon(Icons.Default.LinkOff, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
                         Text("Disconnect")
                     }
@@ -64,26 +97,28 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
 
         Spacer(Modifier.height(16.dp))
 
-        // Scan controls
+        // ===== Unified device list =====
         if (connectionState != "CONNECTED") {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    "Nearby Meshtastic Devices",
+                    "Available Devices",
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.weight(1f)
                 )
                 if (isScanning) {
                     CircularProgressIndicator(modifier = Modifier.size(24.dp))
                     Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = { meshServiceManager.stopScan() }) {
-                        Text("Stop")
-                    }
+                    TextButton(onClick = { meshServiceManager.stopScan() }) { Text("Stop") }
                 } else {
-                    FilledTonalButton(onClick = { meshServiceManager.startScan() }) {
-                        Icon(Icons.Default.BluetoothSearching, contentDescription = null)
+                    FilledTonalButton(onClick = {
+                        // Refresh both transports in one click.
+                        usbDrivers = meshServiceManager.discoverUsbDevices()
+                        meshServiceManager.startScan()
+                    }) {
+                        Icon(Icons.Default.Search, contentDescription = null)
                         Spacer(Modifier.width(4.dp))
                         Text("Scan")
                     }
@@ -92,7 +127,7 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
 
             Spacer(Modifier.height(8.dp))
 
-            if (devices.isEmpty() && !isScanning) {
+            if (entries.isEmpty() && !isScanning) {
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -100,7 +135,9 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        "No devices found.\nMake sure your Meshtastic device is powered on\nand Bluetooth is enabled.",
+                        "No devices found.\n" +
+                            "Plug in a Meshtastic node via USB,\n" +
+                            "or tap Scan to look for Bluetooth devices.",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -108,15 +145,16 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
             }
 
             LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(devices) { device ->
-                    DeviceCard(device = device, onClick = {
-                        meshServiceManager.connect(device)
-                    })
+                items(entries, key = { it.key }) { entry ->
+                    UnifiedDeviceCard(
+                        entry = entry,
+                        onClick = { connect(meshServiceManager, entry) }
+                    )
                 }
             }
         }
 
-        // Show connected nodes
+        // ===== Mesh nodes (after connection) =====
         if (connectionState == "CONNECTED" && nodes.isNotEmpty()) {
             Spacer(Modifier.height(16.dp))
             Text("Mesh Nodes", style = MaterialTheme.typography.titleMedium)
@@ -139,9 +177,60 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
     }
 }
 
+// =============================================================================
+//  Unified device entry model
+// =============================================================================
+
+private sealed class DeviceEntry {
+    abstract val key: String
+    abstract val title: String
+    abstract val subtitle: String
+    abstract val icon: ImageVector
+    abstract val transportLabel: String
+
+    data class Usb(val driver: UsbSerialDriver) : DeviceEntry() {
+        private val device = driver.device
+        override val key: String = "usb-${device.deviceName}"
+        override val title: String = device.productName ?: device.deviceName
+        override val subtitle: String =
+            "VID:%04X PID:%04X · %s".format(
+                device.vendorId, device.productId, driver.javaClass.simpleName
+            )
+        override val icon: ImageVector = Icons.Default.Usb
+        override val transportLabel: String = "USB"
+    }
+
+    data class Ble(val device: BluetoothDevice) : DeviceEntry() {
+        @SuppressLint("MissingPermission")
+        override val key: String = "ble-${device.address}"
+        @SuppressLint("MissingPermission")
+        override val title: String = device.name ?: "Unknown Device"
+        @SuppressLint("MissingPermission")
+        override val subtitle: String = device.address
+        override val icon: ImageVector = Icons.Default.Bluetooth
+        override val transportLabel: String = "BLE"
+    }
+}
+
 @SuppressLint("MissingPermission")
+private fun connect(meshServiceManager: MeshServiceManager, entry: DeviceEntry) {
+    when (entry) {
+        is DeviceEntry.Ble -> meshServiceManager.connect(entry.device)
+        is DeviceEntry.Usb -> {
+            val device = entry.driver.device
+            if (meshServiceManager.usbHasPermission(device)) {
+                meshServiceManager.connectUsb(entry.driver)
+            } else {
+                meshServiceManager.requestUsbPermission(device) { granted ->
+                    if (granted) meshServiceManager.connectUsb(entry.driver)
+                }
+            }
+        }
+    }
+}
+
 @Composable
-private fun DeviceCard(device: BluetoothDevice, onClick: () -> Unit) {
+private fun UnifiedDeviceCard(entry: DeviceEntry, onClick: () -> Unit) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -151,25 +240,25 @@ private fun DeviceCard(device: BluetoothDevice, onClick: () -> Unit) {
             modifier = Modifier.padding(16.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Icon(
-                Icons.Default.Bluetooth,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary
-            )
+            Icon(entry.icon, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = entry.title,
+                        style = MaterialTheme.typography.bodyLarge,
+                        modifier = Modifier.weight(1f)
+                    )
+                    AssistChip(onClick = onClick, label = { Text(entry.transportLabel) })
+                }
                 Text(
-                    text = device.name ?: "Unknown Device",
-                    style = MaterialTheme.typography.bodyLarge
-                )
-                Text(
-                    text = device.address,
+                    text = entry.subtitle,
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
+            Spacer(Modifier.width(8.dp))
             Icon(Icons.Default.ChevronRight, contentDescription = "Connect")
         }
     }
 }
-

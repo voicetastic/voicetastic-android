@@ -19,6 +19,8 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
+        // JitPack — required for com.github.mik3y:usb-serial-for-android (USB transport).
+        maven { url = uri("https://jitpack.io") }
     }
 }
 
