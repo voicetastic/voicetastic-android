@@ -3,7 +3,7 @@ package re.chasam.voicetastic.navigation
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
-import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -21,7 +21,9 @@ import re.chasam.voicetastic.ui.settings.ConfigViewModel
 import re.chasam.voicetastic.ui.settings.SettingsScreen
 
 enum class Screen(val route: String, val title: String, val icon: ImageVector) {
-    Devices("devices", "Devices", Icons.Default.Bluetooth),
+    // Generic "Devices" icon: the screen now lists USB *and* BLE radios, so
+    // the previous Bluetooth glyph implied a single transport.
+    Devices("devices", "Devices", Icons.Default.Devices),
     Chat("chat", "Chat", Icons.AutoMirrored.Filled.Chat),
     Settings("settings", "Settings", Icons.Default.Settings)
 }

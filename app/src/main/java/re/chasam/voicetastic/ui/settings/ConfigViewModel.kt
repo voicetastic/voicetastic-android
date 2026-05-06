@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import com.geeksville.mesh.MeshProtos
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import re.chasam.voicetastic.model.AmrNbBitrate
 import re.chasam.voicetastic.model.VoiceConfig
 import re.chasam.voicetastic.service.MeshServiceManager
@@ -757,10 +758,35 @@ class ConfigViewModel(
     fun refreshDeviceConfig() {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
         clearDirty()
-        meshService.refreshConfig()
         _configStatus.value = "Config refresh requested…"
-        // syncFromServiceFlows() will be triggered automatically by the
-        // configComplete signal from MeshServiceManager.
+        viewModelScope.launch {
+            // Snapshot the LoRa config reference so we can detect *any* refresh
+            // activity (a new emission with the same value or a new instance).
+            val before = meshService.radioConfig.value
+            meshService.refreshConfig()
+            // Race the firmware's configComplete event against a timeout so
+            // the status never sticks at "requested…". On USB the burst is
+            // typically <300 ms; BLE may need a couple of seconds. Modern
+            // Meshtastic firmware always sends configCompleteId at the end
+            // of a want_config_id burst, but if it ever doesn't (LogRecord
+            // floods, oneof confusion, etc.) we still resync the UI here.
+            val completedId = withTimeoutOrNull(8_000) {
+                meshService.configComplete.first()
+            }
+            if (completedId != null) {
+                // The configComplete collector in init{} already ran sync +
+                // set "Config received"; nothing else to do.
+                return@launch
+            }
+            // Timed out. Decide whether *anything* arrived in the meantime.
+            syncFromServiceFlows()
+            val after = meshService.radioConfig.value
+            _configStatus.value = when {
+                after != null && after !== before -> "Refresh partial — no end-of-config marker (using what we got)"
+                after != null -> "Refresh timed out — UI shows last known values"
+                else -> "Refresh timed out — no response from device"
+            }
+        }
     }
 
     fun rebootDevice() {
