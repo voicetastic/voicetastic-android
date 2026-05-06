@@ -1,0 +1,215 @@
+# GitLab CI/CD for Voicetastic — runs unit tests + Android lint, builds debug
+# & release APKs.
+#
+# Toolchain:
+#   - JDK 21 (required by AGP 9.x / Gradle 9.x)
+#   - Android command-line tools, platform-tools, platforms;android-36, build-tools;36.0.0
+#
+# Pipeline shape (DAG):
+#   test stage         build stage          package stage
+#   ┌──────────────┐
+#   │ unit-tests   │──┐
+#   └──────────────┘  │   ┌─────────────────┐
+#                     ├──▶│ assemble-debug  │
+#   ┌──────────────┐  │   └─────────────────┘
+#   │ lint         │──┤
+#   └──────────────┘  │   ┌─────────────────┐
+#                     └──▶│ assemble-release│ (tags / main only)
+#                         └─────────────────┘
+#
+# Cache strategy:
+#   - Two separate caches: Android SDK (rarely changes) + Gradle deps.
+#   - `unit-tests` writes (`pull-push`); all other jobs read-only (`pull`)
+#     so we don't re-upload large caches multiple times per pipeline.
+#
+# Optional CI/CD variables for signing the release APK (set as protected/masked):
+#   ANDROID_KEYSTORE_BASE64  – base64-encoded keystore (.jks/.keystore)
+#   ANDROID_KEYSTORE_PASSWORD
+#   ANDROID_KEY_ALIAS
+#   ANDROID_KEY_PASSWORD
+# If any of those are missing, the release job still runs but produces an unsigned APK.
+
+stages:
+  - test
+  - build
+  - package
+
+# Default runner selection — self-hosted instance runner registered with
+# tags: linux, docker, android. The full `default:` block (including
+# `interruptible`) is defined further down, after `variables:`.
+
+variables:
+  # --- Versions (keep in sync with app/build.gradle.kts and gradle-wrapper.properties) ---
+  ANDROID_COMPILE_SDK: "36"
+  ANDROID_BUILD_TOOLS: "36.0.0"
+  ANDROID_CMDLINE_TOOLS_VERSION: "11076708"   # cmdline-tools rev 13.0
+  # --- Paths (cacheable, must live under $CI_PROJECT_DIR for GitLab cache to pick them up) ---
+  ANDROID_SDK_ROOT: "$CI_PROJECT_DIR/.android-sdk"
+  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g -Dkotlin.compiler.execution.strategy=in-process"
+  # --- Cache transfer perf ---
+  FF_USE_FASTZIP: "true"
+  TRANSFER_METER_FREQUENCY: "5s"
+  ARTIFACT_COMPRESSION_LEVEL: "fast"
+  CACHE_COMPRESSION_LEVEL: "fast"
+
+# Cancel superseded pipelines (e.g. when force-pushing to an MR branch).
+default:
+  tags:
+    - linux
+    - docker
+    - android
+  interruptible: true
+
+# Reusable bootstrap: install JDK + Android SDK, accept licenses, install components.
+.android-setup: &android-setup
+  image: eclipse-temurin:21-jdk
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends unzip wget ca-certificates
+    - mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
+    - |
+      if [ ! -d "$ANDROID_SDK_ROOT/cmdline-tools/latest" ]; then
+        echo "Installing Android command-line tools…"
+        wget -q "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -O /tmp/cmdline-tools.zip
+        unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_SDK_ROOT/cmdline-tools"
+        mv "$ANDROID_SDK_ROOT/cmdline-tools/cmdline-tools" "$ANDROID_SDK_ROOT/cmdline-tools/latest"
+        rm /tmp/cmdline-tools.zip
+      fi
+    - export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
+    - yes | sdkmanager --licenses > /dev/null 2>&1 || true
+    - sdkmanager --install "platform-tools" "platforms;android-${ANDROID_COMPILE_SDK}" "build-tools;${ANDROID_BUILD_TOOLS}" > /dev/null
+    - chmod +x ./gradlew
+
+# ---------------------------------------------------------------------------
+# Cache strategy
+#   Two caches per job:
+#     1. Android SDK — stable, keyed only on cmdline-tools version. Rarely
+#        changes, so we keep a single global cache shared across branches.
+#     2. Gradle deps — keyed on wrapper + version catalog. Updated whenever a
+#        dependency changes.
+#   The `test` stage job (`unit-tests`) writes both caches (`pull-push`).
+#   Downstream jobs only read them (`pull`) — this avoids re-uploading large
+#   caches from every job in the pipeline.
+# ---------------------------------------------------------------------------
+.cache-rw: &cache-rw
+  cache:
+    - key: "android-sdk-${ANDROID_CMDLINE_TOOLS_VERSION}"
+      paths:
+        - .android-sdk
+      policy: pull-push
+    - key:
+        files:
+          - gradle/wrapper/gradle-wrapper.properties
+          - gradle/libs.versions.toml
+      paths:
+        - .gradle/caches
+        - .gradle/wrapper
+        - app/build/intermediates/aar_metadata_check
+      policy: pull-push
+
+.cache-ro: &cache-ro
+  cache:
+    - key: "android-sdk-${ANDROID_CMDLINE_TOOLS_VERSION}"
+      paths:
+        - .android-sdk
+      policy: pull
+    - key:
+        files:
+          - gradle/wrapper/gradle-wrapper.properties
+          - gradle/libs.versions.toml
+      paths:
+        - .gradle/caches
+        - .gradle/wrapper
+        - app/build/intermediates/aar_metadata_check
+      policy: pull
+
+# ----------------------------------------------------------------------------
+# Stage: test — unit tests (writes the shared caches for downstream jobs)
+# ----------------------------------------------------------------------------
+unit-tests:
+  stage: test
+  <<: [*android-setup, *cache-rw]
+  script:
+    - ./gradlew --no-daemon :app:testDebugUnitTest
+  artifacts:
+    when: always
+    reports:
+      junit:
+        - app/build/test-results/testDebugUnitTest/TEST-*.xml
+    paths:
+      - app/build/reports/tests/
+    expire_in: 1 week
+
+# ----------------------------------------------------------------------------
+# Stage: test — Android lint (quality gate, runs in parallel with unit-tests)
+# ----------------------------------------------------------------------------
+lint:
+  stage: test
+  <<: [*android-setup, *cache-ro]
+  script:
+    - ./gradlew --no-daemon :app:lintDebug
+  artifacts:
+    when: always
+    paths:
+      - app/build/reports/lint-results-debug.html
+      - app/build/reports/lint-results-debug.xml
+      - app/build/reports/lint-results-debug.sarif
+    expire_in: 1 week
+
+# ----------------------------------------------------------------------------
+# Stage: build — debug APK (always built, on every branch and MR)
+# ----------------------------------------------------------------------------
+assemble-debug:
+  stage: build
+  <<: [*android-setup, *cache-ro]
+  needs:
+    - job: unit-tests
+      artifacts: false
+  script:
+    - ./gradlew --no-daemon :app:assembleDebug
+  artifacts:
+    name: "voicetastic-debug-${CI_COMMIT_SHORT_SHA}"
+    paths:
+      - app/build/outputs/apk/debug/*.apk
+    expire_in: 4 weeks
+
+# ----------------------------------------------------------------------------
+# Stage: package — release APK (only on tags / main branch)
+# ----------------------------------------------------------------------------
+assemble-release:
+  stage: package
+  <<: [*android-setup, *cache-ro]
+  # Release jobs run on protected refs and may need to be allowed to finish
+  # even if the user starts a newer pipeline.
+  interruptible: false
+  needs:
+    - job: unit-tests
+      artifacts: false
+    - job: lint
+      artifacts: false
+  script:
+    - |
+      if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] \
+         && [ -n "$ANDROID_KEY_ALIAS" ] && [ -n "$ANDROID_KEY_PASSWORD" ]; then
+        echo "Signing keystore detected — building signed release APK."
+        echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$CI_PROJECT_DIR/release.keystore"
+        export RELEASE_STORE_FILE="$CI_PROJECT_DIR/release.keystore"
+        export RELEASE_STORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
+        export RELEASE_KEY_ALIAS="$ANDROID_KEY_ALIAS"
+        export RELEASE_KEY_PASSWORD="$ANDROID_KEY_PASSWORD"
+      else
+        echo "No signing credentials provided — release APK will be unsigned."
+      fi
+    - ./gradlew --no-daemon :app:assembleRelease
+    - rm -f "$CI_PROJECT_DIR/release.keystore"
+  artifacts:
+    name: "voicetastic-release-${CI_COMMIT_REF_SLUG}-${CI_COMMIT_SHORT_SHA}"
+    paths:
+      - app/build/outputs/apk/release/*.apk
+    expire_in: 12 weeks
+  rules:
+    - if: '$CI_COMMIT_TAG'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+      when: manual
+      allow_failure: true
+

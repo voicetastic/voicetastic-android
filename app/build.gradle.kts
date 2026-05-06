@@ -22,6 +22,20 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        // Picked up from CI env vars (see .gitlab-ci.yml `assemble-release`).
+        // When unset (e.g. local debug builds), the release APK stays unsigned.
+        val storeFileEnv = System.getenv("RELEASE_STORE_FILE")
+        if (!storeFileEnv.isNullOrBlank() && file(storeFileEnv).exists()) {
+            create("release") {
+                storeFile = file(storeFileEnv)
+                storePassword = System.getenv("RELEASE_STORE_PASSWORD")
+                keyAlias = System.getenv("RELEASE_KEY_ALIAS")
+                keyPassword = System.getenv("RELEASE_KEY_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -29,6 +43,7 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            signingConfigs.findByName("release")?.let { signingConfig = it }
         }
     }
     compileOptions {
