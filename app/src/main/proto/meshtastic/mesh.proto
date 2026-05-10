@@ -667,6 +667,11 @@ message AdminMessage {
     Config set_config = 34;
     ModuleConfig set_module_config = 35;
 
+    // Manually-fixed position: send a Position to be stored by firmware as
+    // the device's static location. `remove_fixed_position` clears it.
+    Position set_fixed_position = 36;
+    bool remove_fixed_position = 37;
+
     // Actions (real firmware tags)
     int32 reboot_ota_seconds = 95;
     int32 reboot_seconds = 97;

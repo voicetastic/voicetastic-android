@@ -97,7 +97,13 @@ class ConfigViewModel(
         val gpsUpdateInterval: Int = 0,
         val gpsMode: String = "ENABLED",
         val broadcastSmartMinimumDistance: Int = 0,
-        val broadcastSmartMinimumIntervalSecs: Int = 0
+        val broadcastSmartMinimumIntervalSecs: Int = 0,
+        // Manually-fixed coordinates (only meaningful when fixedPosition=true).
+        // Stored in human-readable degrees / metres; converted to the
+        // proto's scaled integer representation on apply.
+        val fixedLatitude: Double = 0.0,
+        val fixedLongitude: Double = 0.0,
+        val fixedAltitude: Int = 0
     )
 
     private val _positionState = MutableStateFlow(PositionUiState())
@@ -236,6 +242,9 @@ class ConfigViewModel(
             meshService.positionConfig.collect { pos -> if (pos != null && !isDirty("position")) updatePositionFromProto(pos) }
         }
         viewModelScope.launch {
+            meshService.myPosition.collect { p -> if (p != null) updateFixedPositionFromMyPosition(p) }
+        }
+        viewModelScope.launch {
             meshService.powerConfig.collect { pwr -> if (pwr != null && !isDirty("power")) updatePowerFromProto(pwr) }
         }
         viewModelScope.launch {
@@ -285,6 +294,7 @@ class ConfigViewModel(
         meshService.radioConfig.value?.let { if (!isDirty("lora")) updateLoraFromProto(it) }
         meshService.deviceConfig.value?.let { if (!isDirty("device")) updateDeviceFromProto(it) }
         meshService.positionConfig.value?.let { if (!isDirty("position")) updatePositionFromProto(it) }
+        meshService.myPosition.value?.let { updateFixedPositionFromMyPosition(it) }
         meshService.powerConfig.value?.let { if (!isDirty("power")) updatePowerFromProto(it) }
         meshService.networkConfig.value?.let { if (!isDirty("network")) updateNetworkFromProto(it) }
         meshService.displayConfig.value?.let { if (!isDirty("display")) updateDisplayFromProto(it) }
@@ -340,7 +350,8 @@ class ConfigViewModel(
     }
 
     private fun updatePositionFromProto(pos: MeshProtos.Config.PositionConfig) {
-        _positionState.value = PositionUiState(
+        val current = _positionState.value
+        _positionState.value = current.copy(
             positionBroadcastSecs = pos.positionBroadcastSecs,
             positionBroadcastSmartEnabled = pos.positionBroadcastSmartEnabled,
             fixedPosition = pos.fixedPosition,
@@ -350,6 +361,24 @@ class ConfigViewModel(
             broadcastSmartMinimumDistance = pos.broadcastSmartMinimumDistance,
             broadcastSmartMinimumIntervalSecs = pos.broadcastSmartMinimumIntervalSecs
         )
+    }
+
+    /**
+     * Pre-fill the fixed-position lat/lon/alt fields from our own NodeInfo
+     * so the user has a sensible starting point rather than zeros.
+     * Skipped when the user is mid-edit (position dirty).
+     */
+    private fun updateFixedPositionFromMyPosition(p: MeshProtos.Position) {
+        if (isDirty("position")) return
+        val cur = _positionState.value
+        // Only seed when user hasn't entered something non-zero already.
+        if (cur.fixedLatitude == 0.0 && cur.fixedLongitude == 0.0 && cur.fixedAltitude == 0) {
+            _positionState.value = cur.copy(
+                fixedLatitude = p.latitudeI / 1e7,
+                fixedLongitude = p.longitudeI / 1e7,
+                fixedAltitude = p.altitude
+            )
+        }
     }
 
     private fun updatePowerFromProto(pwr: MeshProtos.Config.PowerConfig) {
@@ -447,6 +476,9 @@ class ConfigViewModel(
     fun setPositionGpsMode(mode: String) { markDirty("position"); _positionState.value = _positionState.value.copy(gpsMode = mode) }
     fun setPositionSmartMinDistance(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(broadcastSmartMinimumDistance = v) }
     fun setPositionSmartMinInterval(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(broadcastSmartMinimumIntervalSecs = v) }
+    fun setPositionFixedLatitude(v: Double) { markDirty("position"); _positionState.value = _positionState.value.copy(fixedLatitude = v) }
+    fun setPositionFixedLongitude(v: Double) { markDirty("position"); _positionState.value = _positionState.value.copy(fixedLongitude = v) }
+    fun setPositionFixedAltitude(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(fixedAltitude = v) }
 
     // --- Power ---
     fun setPowerSaving(v: Boolean) { markDirty("power"); _powerState.value = _powerState.value.copy(isPowerSaving = v) }
@@ -645,6 +677,34 @@ class ConfigViewModel(
         val ok = meshService.writeConfig(config)
         if (ok) dirty.remove("position")
         _configStatus.value = if (ok) "Position config sent" else "Failed to send position config"
+    }
+
+    /**
+     * Push the user-entered fixed lat/lon/altitude to the device via the
+     * `set_fixed_position` admin message. The PositionConfig.fixed_position
+     * flag must also be enabled (via [applyPositionConfig]) for the device
+     * to use this location in subsequent broadcasts.
+     */
+    fun applyFixedPosition() {
+        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        val s = _positionState.value
+        if (!s.fixedPosition) {
+            _configStatus.value = "Enable Fixed Position first"; return
+        }
+        val pos = MeshProtos.Position.newBuilder()
+            .setLatitudeI((s.fixedLatitude * 1e7).toInt())
+            .setLongitudeI((s.fixedLongitude * 1e7).toInt())
+            .setAltitude(s.fixedAltitude)
+            .build()
+        val ok = meshService.setFixedPosition(pos)
+        _configStatus.value = if (ok) "Fixed position sent" else "Failed to send fixed position"
+    }
+
+    /** Tell the device to forget any previously-set fixed position. */
+    fun clearFixedPosition() {
+        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        val ok = meshService.removeFixedPosition()
+        _configStatus.value = if (ok) "Fixed position cleared" else "Failed to clear fixed position"
     }
 
     fun applyPowerConfig() {

@@ -22,6 +22,26 @@
 #   - `unit-tests` writes (`pull-push`); all other jobs read-only (`pull`)
 #     so we don't re-upload large caches multiple times per pipeline.
 #
+# ---------------------------------------------------------------------------
+# !!  KNOWN INFRASTRUCTURE ISSUE — RUNNER `runner-android bKHg0aHo0`  !!
+# ---------------------------------------------------------------------------
+# The self-hosted runner is enforcing a ~10-second hard wall-clock kill on
+# every individual script line (every `- ...` in script / before_script).
+# This was proven empirically (8 pipeline runs, 2026-05-10):
+#   - Any line that completes in <10 s succeeds.
+#   - `sleep 30` is killed at 9.8 s.
+#   - `./gradlew …` is killed at 10 s, regardless of memory / output / JVM args.
+# Memory is not the cause — the JVM was at 720 MB RSS on a host with
+# 18 GB free, with `memory.max: max` and `pids.max: 38102` in our cgroup,
+# at the moment of SIGKILL.
+#
+# Until the runner host admin removes the per-command timeout (see
+# `/etc/gitlab-runner/config.toml` and any `pre_*_script` wrappers, plus
+# `RUNNER_SCRIPT_TIMEOUT` and `[runners.docker] kill_after_timeout`),
+# NO Gradle build can complete on this runner. There is no `.gitlab-ci.yml`
+# workaround.
+# ---------------------------------------------------------------------------
+#
 # Optional CI/CD variables for signing the release APK (set as protected/masked):
 #   ANDROID_KEYSTORE_BASE64  – base64-encoded keystore (.jks/.keystore)
 #   ANDROID_KEYSTORE_PASSWORD
@@ -34,10 +54,6 @@ stages:
   - build
   - package
 
-# Default runner selection — self-hosted instance runner registered with
-# tags: linux, docker, android. The full `default:` block (including
-# `interruptible`) is defined further down, after `variables:`.
-
 variables:
   # --- Versions (keep in sync with app/build.gradle.kts and gradle-wrapper.properties) ---
   ANDROID_COMPILE_SDK: "36"
@@ -46,7 +62,8 @@ variables:
   # --- Paths (cacheable, must live under $CI_PROJECT_DIR for GitLab cache to pick them up) ---
   ANDROID_SDK_ROOT: "$CI_PROJECT_DIR/.android-sdk"
   GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
-  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g -Dkotlin.compiler.execution.strategy=in-process"
+  # 3 GB heap fits AGP 9.x lint + Compose + Kotlin in-process.
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=512m -XX:+ExitOnOutOfMemoryError -Dkotlin.compiler.execution.strategy=in-process"
   # --- Cache transfer perf ---
   FF_USE_FASTZIP: "true"
   TRANSFER_METER_FREQUENCY: "5s"
@@ -54,6 +71,10 @@ variables:
   CACHE_COMPRESSION_LEVEL: "fast"
 
 # Cancel superseded pipelines (e.g. when force-pushing to an MR branch).
+# NOTE: cancellation appears in job logs as `exit code 137` (SIGKILL),
+# indistinguishable from a kernel OOM kill or the runner timeout described
+# at the top of this file. When debugging, rule those out before assuming
+# memory pressure.
 default:
   tags:
     - linux
@@ -87,7 +108,7 @@ default:
 #        changes, so we keep a single global cache shared across branches.
 #     2. Gradle deps — keyed on wrapper + version catalog. Updated whenever a
 #        dependency changes.
-#   The `test` stage job (`unit-tests`) writes both caches (`pull-push`).
+#   The `lint` job (test stage) writes both caches (`pull-push`).
 #   Downstream jobs only read them (`pull`) — this avoids re-uploading large
 #   caches from every job in the pipeline.
 # ---------------------------------------------------------------------------
@@ -124,11 +145,33 @@ default:
       policy: pull
 
 # ----------------------------------------------------------------------------
-# Stage: test — unit tests (writes the shared caches for downstream jobs)
+# Stage: test — Android lint (quality gate, runs FIRST).
+# Order rationale: lint is a fast-failing static check; if it fails the
+# code shouldn't even be compiled/tested. It also writes the shared caches
+# (`pull-push`) so downstream jobs can reuse them read-only.
+# ----------------------------------------------------------------------------
+lint:
+  stage: test
+  <<: [*android-setup, *cache-rw]
+  script:
+    - ./gradlew --no-daemon :app:lintDebug
+  artifacts:
+    when: always
+    paths:
+      - app/build/reports/lint-results-debug.html
+      - app/build/reports/lint-results-debug.xml
+      - app/build/reports/lint-results-debug.sarif
+    expire_in: 1 week
+
+# ----------------------------------------------------------------------------
+# Stage: test — unit tests (runs after lint passes).
 # ----------------------------------------------------------------------------
 unit-tests:
   stage: test
-  <<: [*android-setup, *cache-rw]
+  <<: [*android-setup, *cache-ro]
+  needs:
+    - job: lint
+      artifacts: false
   script:
     - ./gradlew --no-daemon :app:testDebugUnitTest
   artifacts:
@@ -138,22 +181,6 @@ unit-tests:
         - app/build/test-results/testDebugUnitTest/TEST-*.xml
     paths:
       - app/build/reports/tests/
-    expire_in: 1 week
-
-# ----------------------------------------------------------------------------
-# Stage: test — Android lint (quality gate, runs in parallel with unit-tests)
-# ----------------------------------------------------------------------------
-lint:
-  stage: test
-  <<: [*android-setup, *cache-ro]
-  script:
-    - ./gradlew --no-daemon :app:lintDebug
-  artifacts:
-    when: always
-    paths:
-      - app/build/reports/lint-results-debug.html
-      - app/build/reports/lint-results-debug.xml
-      - app/build/reports/lint-results-debug.sarif
     expire_in: 1 week
 
 # ----------------------------------------------------------------------------
