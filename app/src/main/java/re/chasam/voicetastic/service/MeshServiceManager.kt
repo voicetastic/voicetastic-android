@@ -202,6 +202,7 @@ class MeshServiceManager(private val context: Context) {
         _radioConfig.value = null
         _deviceConfig.value = null
         _positionConfig.value = null
+        _myPosition.value = null
         _powerConfig.value = null
         _networkConfig.value = null
         _displayConfig.value = null
@@ -223,6 +224,14 @@ class MeshServiceManager(private val context: Context) {
 
     private val _positionConfig = MutableStateFlow<MeshProtos.Config.PositionConfig?>(null)
     val positionConfig: StateFlow<MeshProtos.Config.PositionConfig?> = _positionConfig.asStateFlow()
+
+    /**
+     * Last-known Position reported by our own NodeInfo. Used to seed the
+     * "Fixed Position" editor in Settings so the user can edit and re-send
+     * lat/lon/altitude rather than starting from zeros.
+     */
+    private val _myPosition = MutableStateFlow<MeshProtos.Position?>(null)
+    val myPosition: StateFlow<MeshProtos.Position?> = _myPosition.asStateFlow()
 
     private val _powerConfig = MutableStateFlow<MeshProtos.Config.PowerConfig?>(null)
     val powerConfig: StateFlow<MeshProtos.Config.PowerConfig?> = _powerConfig.asStateFlow()
@@ -704,6 +713,11 @@ class MeshServiceManager(private val context: Context) {
                 if (ni.num == myNodeNum && ni.hasUser()) {
                     _owner.value = ni.user
                 }
+                // Track our own Position so the Fixed-Position editor can
+                // pre-fill lat/lon/altitude with the firmware's current value.
+                if (ni.num == myNodeNum && ni.hasPosition()) {
+                    _myPosition.value = ni.position
+                }
             }
 
             fromRadio.hasPacket() -> handleMeshPacket(fromRadio.packet)
@@ -1016,6 +1030,28 @@ class MeshServiceManager(private val context: Context) {
     fun writeModuleConfig(moduleConfig: MeshProtos.ModuleConfig): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setSetModuleConfig(moduleConfig)
+            .build()
+        return sendAdminMessage(admin)
+    }
+
+    /**
+     * Send a Position to be stored on the device as its manually-fixed
+     * location. The device must also have PositionConfig.fixed_position=true
+     * for this to take effect on subsequent broadcasts.
+     */
+    fun setFixedPosition(position: MeshProtos.Position): Boolean {
+        val admin = MeshProtos.AdminMessage.newBuilder()
+            .setSetFixedPosition(position)
+            .build()
+        return sendAdminMessage(admin)
+    }
+
+    /**
+     * Clear any previously-set fixed position on the device.
+     */
+    fun removeFixedPosition(): Boolean {
+        val admin = MeshProtos.AdminMessage.newBuilder()
+            .setRemoveFixedPosition(true)
             .build()
         return sendAdminMessage(admin)
     }

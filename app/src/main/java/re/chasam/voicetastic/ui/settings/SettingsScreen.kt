@@ -192,6 +192,24 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                 SwitchSetting("GPS Enabled", positionState.gpsEnabled) { viewModel.setPositionGpsEnabled(it) }
                 Spacer(Modifier.height(8.dp))
                 SwitchSetting("Fixed Position", positionState.fixedPosition) { viewModel.setPositionFixed(it) }
+                if (positionState.fixedPosition) {
+                    Spacer(Modifier.height(8.dp))
+                    DoubleFieldSetting("Latitude (°)", positionState.fixedLatitude) { viewModel.setPositionFixedLatitude(it) }
+                    Spacer(Modifier.height(8.dp))
+                    DoubleFieldSetting("Longitude (°)", positionState.fixedLongitude) { viewModel.setPositionFixedLongitude(it) }
+                    Spacer(Modifier.height(8.dp))
+                    NumberFieldSetting("Altitude (m)", positionState.fixedAltitude) { viewModel.setPositionFixedAltitude(it) }
+                    Spacer(Modifier.height(8.dp))
+                    Row(Modifier.fillMaxWidth()) {
+                        Button(onClick = { viewModel.applyFixedPosition() }, modifier = Modifier.weight(1f)) {
+                            Text("Apply Fixed Position")
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        OutlinedButton(onClick = { viewModel.clearFixedPosition() }, modifier = Modifier.weight(1f)) {
+                            Text("Clear")
+                        }
+                    }
+                }
                 Spacer(Modifier.height(8.dp))
                 SwitchSetting("Smart Broadcast", positionState.positionBroadcastSmartEnabled) { viewModel.setPositionSmartEnabled(it) }
                 Spacer(Modifier.height(8.dp))
@@ -464,6 +482,33 @@ private fun FloatFieldSetting(label: String, value: Float, onValueChange: (Float
     OutlinedTextField(
         value = if (value == 0f) "0" else value.toString(),
         onValueChange = { onValueChange(it.toFloatOrNull() ?: 0f) },
+        label = { Text(label) },
+        modifier = Modifier.fillMaxWidth(),
+        singleLine = true,
+        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal)
+    )
+}
+
+/**
+ * Free-form decimal field backed by a `Double`. Used for high-precision
+ * coordinates (latitude / longitude) where Float lacks the resolution
+ * needed for sub-metre accuracy.
+ *
+ * Holds a local string so the user can type intermediate states like "-",
+ * "1.", or "1.0" without the value being clobbered to 0 mid-typing.
+ */
+@Composable
+private fun DoubleFieldSetting(label: String, value: Double, onValueChange: (Double) -> Unit) {
+    var text by remember(value) {
+        mutableStateOf(if (value == 0.0) "" else value.toString())
+    }
+    OutlinedTextField(
+        value = text,
+        onValueChange = { newText ->
+            text = newText
+            newText.toDoubleOrNull()?.let(onValueChange)
+                ?: if (newText.isBlank()) onValueChange(0.0) else Unit
+        },
         label = { Text(label) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
