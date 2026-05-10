@@ -7,6 +7,8 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import re.chasam.voicetastic.core.Clock
+import re.chasam.voicetastic.core.Logger
 import re.chasam.voicetastic.model.AmrNbBitrate
 import re.chasam.voicetastic.model.VoiceMessage
 import java.io.ByteArrayOutputStream
@@ -20,11 +22,18 @@ import java.io.ByteArrayOutputStream
  * Uses a coroutine [Mutex] instead of `synchronized` for suspension-friendly locking.
  * Maintains a recently-completed blacklist to reject stale duplicate chunks
  * that arrive after a message has already been finalized.
+ *
+ * Wall-clock access goes through [clock] and logging through [logger] so this
+ * class is exercisable from pure-JVM unit tests; the upstream Rust
+ * `voicetastic-core` crate uses the same seam shape (`chrono::Utc` +
+ * `tracing`). See `INTEGRATION.md`.
  */
 class VoiceAssembler(
     private val chunkTimeoutSeconds: Int = 30,
     private val partialPlayOnTimeout: Boolean = true,
-    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val scope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob()),
+    private val clock: Clock = Clock.System,
+    private val logger: Logger = AndroidLogger,
 ) {
 
     companion object {
@@ -37,6 +46,14 @@ class VoiceAssembler(
         private const val BLACKLIST_EXPIRY_MS = 60_000L
         /** Max blacklist size to prevent unbounded growth */
         private const val MAX_BLACKLIST_SIZE = 100
+
+        /** Default logger that proxies to [android.util.Log]. */
+        private val AndroidLogger: Logger = object : Logger {
+            override fun d(tag: String, msg: String, t: Throwable?) { Log.d(tag, msg, t) }
+            override fun i(tag: String, msg: String, t: Throwable?) { Log.i(tag, msg, t) }
+            override fun w(tag: String, msg: String, t: Throwable?) { Log.w(tag, msg, t) }
+            override fun e(tag: String, msg: String, t: Throwable?) { Log.e(tag, msg, t) }
+        }
     }
 
     /**
@@ -54,7 +71,7 @@ class VoiceAssembler(
         val bitrateIndex: Int,
         val destinationId: String = "",
         val channel: Int = 0,
-        val startTime: Long = System.currentTimeMillis()
+        val startTime: Long,
     ) {
         val chunks: MutableMap<Int, ByteArray> = mutableMapOf()
         var timeoutJob: Job? = null
@@ -85,7 +102,7 @@ class VoiceAssembler(
      */
     fun onChunkReceived(from: String, chunkData: ByteArray, destinationId: String = "", channel: Int = 0) {
         val header = VoiceChunker.parseHeader(chunkData) ?: run {
-            Log.w(TAG, "Invalid chunk header from $from")
+            logger.w(TAG, "Invalid chunk header from $from")
             return
         }
 
@@ -96,7 +113,7 @@ class VoiceAssembler(
             mutex.withLock {
                 // Reject chunks for recently-completed messages (late duplicates)
                 if (recentlyCompleted.containsKey(key)) {
-                    Log.d(TAG, "Ignoring late chunk for completed msg ${key.messageId} from ${key.from}")
+                    logger.d(TAG, "Ignoring late chunk for completed msg ${key.messageId} from ${key.from}")
                     return@withLock
                 }
 
@@ -107,7 +124,8 @@ class VoiceAssembler(
                         totalChunks = header.totalChunks,
                         bitrateIndex = header.bitrateIndex,
                         destinationId = destinationId,
-                        channel = channel
+                        channel = channel,
+                        startTime = clock.nowMs(),
                     )
                     // Start timeout timer
                     newState.timeoutJob = scope.launch {
@@ -120,7 +138,7 @@ class VoiceAssembler(
                 // Store the chunk (ignore duplicates)
                 if (!state.chunks.containsKey(header.chunkIndex)) {
                     state.chunks[header.chunkIndex] = payload
-                    Log.d(TAG, "Chunk ${header.chunkIndex + 1}/${header.totalChunks} " +
+                    logger.d(TAG, "Chunk ${header.chunkIndex + 1}/${header.totalChunks} " +
                             "for msg ${header.messageId} from $from")
                 }
 
@@ -139,14 +157,14 @@ class VoiceAssembler(
     private suspend fun onTimeout(key: AssemblyKey) {
         mutex.withLock {
             val state = assemblies[key] ?: return
-            Log.w(TAG, "Timeout for msg ${key.messageId} from ${key.from}: " +
+            logger.w(TAG, "Timeout for msg ${key.messageId} from ${key.from}: " +
                     "${state.receivedCount}/${state.totalChunks} chunks received")
 
             if (partialPlayOnTimeout && state.receivedCount > 0) {
                 finalizeMessage(key, state, isPartial = true)
             } else {
                 assemblies.remove(key)
-                Log.w(TAG, "Discarding incomplete message ${key.messageId}")
+                logger.w(TAG, "Discarding incomplete message ${key.messageId}")
             }
         }
     }
@@ -177,10 +195,10 @@ class VoiceAssembler(
         _completedMessages.tryEmit(message)
 
         if (isPartial) {
-            Log.i(TAG, "Emitting partial voice message ${state.messageId}: " +
+            logger.i(TAG, "Emitting partial voice message ${state.messageId}: " +
                     "${state.receivedCount}/${state.totalChunks} chunks")
         } else {
-            Log.i(TAG, "Emitting complete voice message ${state.messageId}")
+            logger.i(TAG, "Emitting complete voice message ${state.messageId}")
         }
     }
 
@@ -222,7 +240,7 @@ class VoiceAssembler(
      * Evicts entries older than [BLACKLIST_EXPIRY_MS] and caps at [MAX_BLACKLIST_SIZE].
      */
     private fun addToBlacklist(key: AssemblyKey) {
-        val now = System.currentTimeMillis()
+        val now = clock.nowMs()
 
         // Evict expired entries
         val iterator = recentlyCompleted.entries.iterator()
