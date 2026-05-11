@@ -26,20 +26,20 @@ class VoiceProtocolTest : FunSpec({
 
     test("v2 wire geometry mirrors the Rust core consts") {
         VoiceProtocol.V2_HEADER_SIZE shouldBe 12
-        VoiceProtocol.V2_MAX_PACKET_SIZE shouldBe 237
+        VoiceProtocol.V2_MAX_PACKET_SIZE shouldBe 231
         VoiceProtocol.V2_GCM_NONCE_LEN shouldBe 12
         VoiceProtocol.V2_GCM_TAG_LEN shouldBe 16
-        VoiceProtocol.V2_MIN_CHUNK_SIZE shouldBe 8
-        VoiceProtocol.V2_MAX_BODY_SIZE shouldBe 200
-        VoiceProtocol.V2_MAX_CHUNKS_PER_MESSAGE shouldBe 64
-        VoiceProtocol.V2_MAX_PARITY_PER_MESSAGE shouldBe 16
-        VoiceProtocol.V2_MAX_MESSAGE_BYTES shouldBe 64 * 200
+        VoiceProtocol.V2_MIN_CHUNK_SIZE shouldBe 16
+        VoiceProtocol.V2_MAX_BODY_SIZE shouldBe 219
+        VoiceProtocol.V2_MAX_CHUNKS_PER_MESSAGE shouldBe 255
+        VoiceProtocol.V2_MAX_PARITY_PER_MESSAGE shouldBe 128
+        VoiceProtocol.V2_MAX_MESSAGE_BYTES shouldBe 255 * 219
         VoiceProtocol.V2_MAX_IN_PROGRESS_PER_SENDER shouldBe 4
-        VoiceProtocol.V2_MAX_IN_PROGRESS_GLOBAL shouldBe 32
-        VoiceProtocol.V2_BLACKLIST_TTL_MS shouldBe 60_000L
-        VoiceProtocol.V2_BLACKLIST_MAX shouldBe 256
-        VoiceProtocol.V2_NACK_WINDOW_MS shouldBe 800L
-        VoiceProtocol.V2_NACK_MAX_ROUNDS shouldBe 3
+        VoiceProtocol.V2_MAX_IN_PROGRESS_GLOBAL shouldBe 64
+        VoiceProtocol.V2_BLACKLIST_TTL_MS shouldBe 600_000L
+        VoiceProtocol.V2_BLACKLIST_MAX shouldBe 100
+        VoiceProtocol.V2_NACK_WINDOW_MS shouldBe 1_500L
+        VoiceProtocol.V2_NACK_MAX_ROUNDS shouldBe 32
     }
 
     test("detectVersion returns first byte, null on empty") {
@@ -48,4 +48,3 @@ class VoiceProtocolTest : FunSpec({
         VoiceProtocol.detectVersion(byteArrayOf()).shouldBeNull()
     }
 })
-

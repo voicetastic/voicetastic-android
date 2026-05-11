@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Android Lint configuration for the :app module.
+  Auto-detected by AGP when placed at the module root (no extra Gradle wiring
+  needed).
+
+  UniFFI's generated Kotlin uses `java.lang.ref.Cleaner` (API 33+) wrapped in a
+  `Class.forName(...)` runtime check that falls back to the JNA cleaner on older
+  Android. Lint's static analysis can't see that guard, so it flags the call as
+  a NewApi error against our minSdk = 29.
+
+  Scope the suppression as narrowly as possible: only the generated UniFFI
+  Kotlin under app/build/generated/source/uniffi/.
+-->
+<lint>
+    <issue id="NewApi">
+        <ignore path="**/generated/source/uniffi/**/*.kt" />
+    </issue>
+</lint>
+

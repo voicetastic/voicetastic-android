@@ -90,6 +90,49 @@ The existing test suite (Voice chunker/assembler/framing/portnums/config — 60 
 
 There are three viable approaches; pick one before doing more work.
 
+### 3.0 Does this pull in the Meshtastic protobufs?
+
+**Yes — partially, and only on certain paths.** The upstream core is split:
+
+| Rust module                                                | Touches `crate::proto`? |
+|------------------------------------------------------------|-------------------------|
+| `voice::` (assembler, builder, chunker, header, nack, crypto, consts) | **No** — pure bytes-in / bytes-out over `Transport`. |
+| `service::{mod, inbound, outbound, types, voice_tx}`       | **Yes** — `NodeInfo`, `User`, `MeshPacket`, `ToRadio`, `FromRadio`, `Routing`, `Data`, `Channel`, `Config`, `ModuleConfig`. |
+| `ble::`, `serial::`                                        | No (raw bytes). Off-by-default features anyway. |
+
+Mechanically, `voicetastic-core/Cargo.toml` lists `prost` + a
+`prost-build` build-dep, and `build.rs` invokes `protoc` against
+`../../proto/meshtastic/*.proto` (a git submodule of the upstream
+[`meshtastic/protobufs`](https://github.com/meshtastic/protobufs)
+snapshot). `src/proto.rs` then `include!`s the generated `meshtastic.rs`.
+
+**The Android app already compiles the same protos** via
+`com.google.protobuf` + `protobuf-javalite`, with vendored copies of
+`mesh.proto` and `portnums.proto` under
+`app/src/main/proto/meshtastic/`. So there is no *new* proto tooling
+requirement — only a **snapshot-pinning** requirement: both sides must
+build from the same upstream revision. Recommendation: replace the
+vendored `app/src/main/proto/meshtastic/` files with a git submodule
+pointing at the same SHA as `voicetastic-desktop/proto`, so a `git
+submodule update` keeps Android and desktop in lock-step.
+
+Per option, what each implies:
+
+- **A (UniFFI / JNI):** Rust still generates `prost` bindings inside the
+  `.so`; Android still generates `javalite` classes. Two parallel
+  generated trees for the *same* `.proto` snapshot. They never meet at
+  type level — only the byte-level BLE/USB wire crosses JNI — so they
+  stay compatible iff they're compiled from the same upstream SHA.
+- **B (Kotlin port of `voice::` only, recommended):** **zero new proto
+  work.** The voice subtree is proto-free; `service::` is reimplemented
+  on top of the existing javalite `MeshPacket` / `Data` / `PortNum`
+  classes the app already has.
+- **C (Kotlin port of `voice::` + `service::`):** still no new tooling,
+  but additional `.proto` files must be added to
+  `app/src/main/proto/meshtastic/` for `ToRadio`, `FromRadio`,
+  `NodeInfo`, `User`, `Channel`, `Config`, `ModuleConfig`, `Routing`
+  (the javalite plugin compiles them automatically).
+
 ### Option A — UniFFI (recommended)
 
 Mozilla's [`uniffi-rs`](https://github.com/mozilla/uniffi-rs) generates a

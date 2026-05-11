@@ -6,13 +6,11 @@ package re.chasam.voicetastic.core
  * Mirrors `voicetastic-core/src/voice/consts.rs` from
  * <https://git.cha-sam.re/acarteron/voicetastic-desktop>.
  *
- * **Note:** the Android codebase currently implements **protocol v1**
- * (6-byte header, see [re.chasam.voicetastic.voice.VoiceChunker]). The
- * Rust core ships **protocol v2** (12-byte header, FEC, optional AES-GCM
- * crypto, NACKs). Both share the same `PRIVATE_APP` port and the same
- * leading [PROTOCOL_VERSION] byte so a receiver can dispatch on the first
- * byte. Constants below cover both generations; v2 ones are kept here as
- * the integration target.
+ * The Android codebase now delegates the wire protocol entirely to the
+ * Rust core (UniFFI-bound via the `voicetastic-android-bridge` crate);
+ * these constants are retained as a convenient Kotlin-side reference for
+ * higher layers (e.g. capacity planning, UI hints) and to assert
+ * cross-language agreement in tests. **Source of truth lives in Rust.**
  */
 object VoiceProtocol {
 
@@ -39,8 +37,8 @@ object VoiceProtocol {
     /** v2 header size in bytes. */
     const val V2_HEADER_SIZE: Int = 12
 
-    /** v2 absolute maximum packet size (header + ciphertext + tag). */
-    const val V2_MAX_PACKET_SIZE: Int = 237
+    /** v2 absolute maximum packet size (Meshtastic LoRa MTU). */
+    const val V2_MAX_PACKET_SIZE: Int = 231
 
     /** v2 GCM nonce length, bytes. */
     const val V2_GCM_NONCE_LEN: Int = 12
@@ -49,16 +47,16 @@ object VoiceProtocol {
     const val V2_GCM_TAG_LEN: Int = 16
 
     /** v2 minimum chunk size, bytes. */
-    const val V2_MIN_CHUNK_SIZE: Int = 8
+    const val V2_MIN_CHUNK_SIZE: Int = 16
 
-    /** v2 maximum body (post-decrypt payload) size, bytes. */
-    const val V2_MAX_BODY_SIZE: Int = 200
+    /** v2 maximum body bytes per frame ([V2_MAX_PACKET_SIZE] − [V2_HEADER_SIZE]). */
+    const val V2_MAX_BODY_SIZE: Int = V2_MAX_PACKET_SIZE - V2_HEADER_SIZE
 
-    /** v2 hard cap on data chunks per message. */
-    const val V2_MAX_CHUNKS_PER_MESSAGE: Int = 64
+    /** v2 hard cap on data chunks per message (`total_data` field is `u8`). */
+    const val V2_MAX_CHUNKS_PER_MESSAGE: Int = 255
 
     /** v2 hard cap on parity (Reed-Solomon) chunks per message. */
-    const val V2_MAX_PARITY_PER_MESSAGE: Int = 16
+    const val V2_MAX_PARITY_PER_MESSAGE: Int = 128
 
     /** v2 hard cap on total reassembled audio size, bytes. */
     const val V2_MAX_MESSAGE_BYTES: Int = V2_MAX_CHUNKS_PER_MESSAGE * V2_MAX_BODY_SIZE
@@ -67,19 +65,19 @@ object VoiceProtocol {
     const val V2_MAX_IN_PROGRESS_PER_SENDER: Int = 4
 
     /** v2 maximum in-flight assemblies across all senders. */
-    const val V2_MAX_IN_PROGRESS_GLOBAL: Int = 32
+    const val V2_MAX_IN_PROGRESS_GLOBAL: Int = 64
 
     /** v2 completed-message blacklist TTL (ms). */
-    const val V2_BLACKLIST_TTL_MS: Long = 60_000L
+    const val V2_BLACKLIST_TTL_MS: Long = 600_000L
 
     /** v2 completed-message blacklist max size. */
-    const val V2_BLACKLIST_MAX: Int = 256
+    const val V2_BLACKLIST_MAX: Int = 100
 
-    /** v2 NACK round-trip window (ms). */
-    const val V2_NACK_WINDOW_MS: Long = 800L
+    /** v2 NACK quiet-window before re-requesting missing chunks (ms). */
+    const val V2_NACK_WINDOW_MS: Long = 1_500L
 
     /** v2 max NACK rounds before giving up on a message. */
-    const val V2_NACK_MAX_ROUNDS: Int = 3
+    const val V2_NACK_MAX_ROUNDS: Int = 32
 
     /**
      * Returns the protocol version byte of a PRIVATE_APP payload, or `null`
@@ -88,4 +86,3 @@ object VoiceProtocol {
     fun detectVersion(bytes: ByteArray): Int? =
         if (bytes.isEmpty()) null else bytes[0].toInt() and 0xFF
 }
-
