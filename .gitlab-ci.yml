@@ -59,11 +59,40 @@ variables:
   ANDROID_COMPILE_SDK: "36"
   ANDROID_BUILD_TOOLS: "36.0.0"
   ANDROID_CMDLINE_TOOLS_VERSION: "11076708"   # cmdline-tools rev 13.0
+  # NDK version installed via sdkmanager. Used by the Rust bridge to
+  # cross-compile `libvoicetastic.so` for arm64-v8a / x86_64 (see
+  # app/build.gradle.kts -> rustAbis). Bump in lockstep with what local
+  # devs install through Android Studio.
+  ANDROID_NDK_VERSION: "27.0.12077973"
   # --- Paths (cacheable, must live under $CI_PROJECT_DIR for GitLab cache to pick them up) ---
   ANDROID_SDK_ROOT: "$CI_PROJECT_DIR/.android-sdk"
+  ANDROID_NDK_HOME: "$CI_PROJECT_DIR/.android-sdk/ndk/27.0.12077973"
   GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
+  CARGO_HOME: "$CI_PROJECT_DIR/.cargo"
+  RUSTUP_HOME: "$CI_PROJECT_DIR/.rustup"
+  # `voicetastic-core/build.rs` (via prost-build) needs to resolve the
+  # well-known `google/protobuf/descriptor.proto`, imported by
+  # Meshtastic's `nanopb.proto`. Ubuntu's `libprotobuf-dev` ships it
+  # under `/usr/include/google/protobuf/`. prost-build honours
+  # `PROTOC_INCLUDE` for the lookup path.
+  PROTOC_INCLUDE: "/usr/include"
   # 3 GB heap fits AGP 9.x lint + Compose + Kotlin in-process.
   GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=512m -XX:+ExitOnOutOfMemoryError -Dkotlin.compiler.execution.strategy=in-process"
+  # Pull in the voicetastic-desktop submodule (Rust crates + .udl) so the
+  # uniffiBindgen and cargoBuild<Abi> tasks have something to operate on.
+  # Without this, the runner logs `Skipping Git submodules setup` and the
+  # Gradle Exec tasks fail with "input file does not exist".
+  GIT_SUBMODULE_STRATEGY: recursive
+  GIT_SUBMODULE_DEPTH: "1"
+  # `.gitmodules` declares the submodule URL with the SSH form
+  # (`git@git.cha-sam.re:…`) so local developers don't need an HTTPS
+  # token. The runner image has neither ssh nor a deploy key, so let
+  # GitLab rewrite it on-the-fly to HTTPS and auth with `CI_JOB_TOKEN`.
+  #
+  # Requires the sibling project `voicetastic-desktop` to allow this
+  # project in its **Settings → CI/CD → Job token permissions**
+  # allowlist; otherwise the clone fails with 404.
+  GIT_SUBMODULE_FORCE_HTTPS: "true"
   # --- Cache transfer perf ---
   FF_USE_FASTZIP: "true"
   TRANSFER_METER_FREQUENCY: "5s"
@@ -86,7 +115,7 @@ default:
 .android-setup: &android-setup
   image: eclipse-temurin:21-jdk
   before_script:
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends unzip wget ca-certificates
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends unzip wget ca-certificates curl build-essential protobuf-compiler libprotobuf-dev
     - mkdir -p "$ANDROID_SDK_ROOT/cmdline-tools"
     - |
       if [ ! -d "$ANDROID_SDK_ROOT/cmdline-tools/latest" ]; then
@@ -98,7 +127,19 @@ default:
       fi
     - export PATH="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$ANDROID_SDK_ROOT/platform-tools:$PATH"
     - yes | sdkmanager --licenses > /dev/null 2>&1 || true
-    - sdkmanager --install "platform-tools" "platforms;android-${ANDROID_COMPILE_SDK}" "build-tools;${ANDROID_BUILD_TOOLS}" > /dev/null
+    - sdkmanager --install "platform-tools" "platforms;android-${ANDROID_COMPILE_SDK}" "build-tools;${ANDROID_BUILD_TOOLS}" "ndk;${ANDROID_NDK_VERSION}" > /dev/null
+    # --- Rust toolchain (needed by uniffiBindgen + cargoBuild<Abi>) ----------
+    # Installed under $CARGO_HOME / $RUSTUP_HOME so the directories are
+    # part of $CI_PROJECT_DIR and get cached by the gradle-deps cache key.
+    - |
+      if [ ! -x "$CARGO_HOME/bin/cargo" ]; then
+        echo "Installing Rust stable + Android targets…"
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+          sh -s -- -y --default-toolchain stable --profile minimal \
+                   --target aarch64-linux-android --target x86_64-linux-android
+      fi
+    - export PATH="$CARGO_HOME/bin:$PATH"
+    - rustup target add aarch64-linux-android x86_64-linux-android > /dev/null
     - chmod +x ./gradlew
 
 # ---------------------------------------------------------------------------
@@ -114,33 +155,43 @@ default:
 # ---------------------------------------------------------------------------
 .cache-rw: &cache-rw
   cache:
-    - key: "android-sdk-${ANDROID_CMDLINE_TOOLS_VERSION}"
+    - key: "android-sdk-${ANDROID_CMDLINE_TOOLS_VERSION}-ndk-${ANDROID_NDK_VERSION}"
       paths:
         - .android-sdk
       policy: pull-push
+    # GitLab caps `files:` at 2 entries -- pick the two that actually
+    # change the dep graph: the Gradle version catalog and the Rust
+    # lockfile. The wrapper version is rarely touched and changing it
+    # without bumping deps shouldn't invalidate this cache anyway.
     - key:
         files:
-          - gradle/wrapper/gradle-wrapper.properties
           - gradle/libs.versions.toml
+          - third_party/voicetastic-desktop/Cargo.lock
       paths:
         - .gradle/caches
         - .gradle/wrapper
+        - .cargo
+        - .rustup
+        - third_party/voicetastic-desktop/target-android
         - app/build/intermediates/aar_metadata_check
       policy: pull-push
 
 .cache-ro: &cache-ro
   cache:
-    - key: "android-sdk-${ANDROID_CMDLINE_TOOLS_VERSION}"
+    - key: "android-sdk-${ANDROID_CMDLINE_TOOLS_VERSION}-ndk-${ANDROID_NDK_VERSION}"
       paths:
         - .android-sdk
       policy: pull
     - key:
         files:
-          - gradle/wrapper/gradle-wrapper.properties
           - gradle/libs.versions.toml
+          - third_party/voicetastic-desktop/Cargo.lock
       paths:
         - .gradle/caches
         - .gradle/wrapper
+        - .cargo
+        - .rustup
+        - third_party/voicetastic-desktop/target-android
         - app/build/intermediates/aar_metadata_check
       policy: pull
 

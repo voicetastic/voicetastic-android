@@ -18,6 +18,7 @@ coroutinesTest = "1.9.0"
 protobuf = "4.28.3"
 protobufPlugin = "0.10.0"
 usbSerial = "3.7.3"
+jna = "5.17.0"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -45,6 +46,9 @@ protobuf-javalite = { group = "com.google.protobuf", name = "protobuf-javalite",
 
 # USB serial transport (Meshtastic over USB)
 usb-serial = { group = "com.github.mik3y", name = "usb-serial-for-android", version.ref = "usbSerial" }
+
+# UniFFI Kotlin runtime (JNA-backed bindings to libvoicetastic.so)
+jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
 
 # Testing
 kotest-runner = { group = "io.kotest", name = "kotest-runner-junit5", version.ref = "kotest" }

@@ -1,36 +1,72 @@
 package re.chasam.voicetastic.ui.chat
 
 import android.content.Context
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import re.chasam.voicetastic.core.NodeIds
 import re.chasam.voicetastic.model.ChatItem
 import re.chasam.voicetastic.model.MeshNode
 import re.chasam.voicetastic.model.VoiceConfig
 import re.chasam.voicetastic.service.MeshServiceManager
 import re.chasam.voicetastic.service.Portnums
-import re.chasam.voicetastic.voice.VoiceAssembler
-import re.chasam.voicetastic.voice.VoiceChunker
 import re.chasam.voicetastic.voice.VoicePlayer
 import re.chasam.voicetastic.voice.VoiceRecorder
+import uniffi.voicetastic.AssemblerConfig
+import uniffi.voicetastic.AssemblyEvent
+import uniffi.voicetastic.BuildConfig
+import uniffi.voicetastic.VoiceAssembler as RustVoiceAssembler
+import uniffi.voicetastic.VoiceCodec
+import uniffi.voicetastic.VoiceMessageOut
+import uniffi.voicetastic.buildMessage
+import uniffi.voicetastic.randomMessageId
 import java.io.File
 
 /**
  * ViewModel for the unified chat screen (text + voice messages).
+ *
+ * Voice protocol is delegated to the native `voicetastic-core` crate via
+ * the UniFFI-generated [uniffi.voicetastic] bindings. See `INTEGRATION.md`.
  */
 class MessagingViewModel(
     private val meshService: MeshServiceManager,
     private val context: Context,
     private val voiceConfig: MutableStateFlow<VoiceConfig> = MutableStateFlow(VoiceConfig())
 ) : ViewModel() {
+
+    companion object {
+        private const val TAG = "MessagingVM"
+
+        /** Default Reed-Solomon parity chunks per message. 0 = FEC disabled. */
+        private const val DEFAULT_PARITY_COUNT: UByte = 0u
+
+        /** Wire chunk body size. Matches `voicetastic_core::voice::MAX_BODY_SIZE`. */
+        private const val DEFAULT_CHUNK_SIZE: UInt = 219u
+
+        /** NACK window (ms). Mirrors `voicetastic_core::voice::NACK_WINDOW_MS`. */
+        private const val NACK_WINDOW_MS: ULong = 1500uL
+
+        /** Tick cadence: half the NACK window, so retransmit requests fire promptly. */
+        private const val TICK_INTERVAL_MS: Long = 750L
+
+        /** Per-message completion memory before duplicates are forgotten. */
+        private const val COMPLETION_MEMORY_MS: ULong = 600_000uL
+
+        /** Hard cap on NACK rounds per message. Mirrors `NACK_MAX_ROUNDS`. */
+        private const val MAX_NACK_ROUNDS: UByte = 32u
+    }
 
     // Master list of ALL chat items (unfiltered)
     private val _allChatItems = MutableStateFlow<List<ChatItem>>(emptyList())
@@ -47,10 +83,6 @@ class MessagingViewModel(
      * Conversation identity uses each message's pre-computed `contactKey`:
      *   - selectedNode == null  → conversation key = "broadcast"
      *   - selectedNode != null  → conversation key = selectedNode.nodeId
-     *
-     * Mirrors the meshtastic-android Contact model: each message belongs to
-     * exactly one conversation, decided at ingestion time. No perspective-
-     * dependent or fallback logic at filter time.
      */
     val chatItems: StateFlow<List<ChatItem>> = combine(
         _allChatItems,
@@ -90,11 +122,24 @@ class MessagingViewModel(
     // Voice state
     private val recorder = VoiceRecorder(context)
     private val player = VoicePlayer()
-    private val assembler = VoiceAssembler(
-        chunkTimeoutSeconds = voiceConfig.value.chunkTimeoutSeconds,
-        partialPlayOnTimeout = voiceConfig.value.partialPlayOnTimeout,
-        scope = viewModelScope
+
+    /**
+     * Native voice assembler. Owned by this ViewModel; closed in [onCleared].
+     */
+    private val assembler: RustVoiceAssembler = RustVoiceAssembler(
+        AssemblerConfig(
+            messageTimeoutMs = (voiceConfig.value.chunkTimeoutSeconds * 1000L).toULong(),
+            partialPlayOnTimeout = voiceConfig.value.partialPlayOnTimeout,
+            channelPsk = null,
+            maxNackRounds = MAX_NACK_ROUNDS,
+            nackWindowMs = NACK_WINDOW_MS,
+            completionMemoryMs = COMPLETION_MEMORY_MS,
+        )
     )
+
+    private val _completedVoiceMessages =
+        MutableSharedFlow<VoiceMessageOut>(extraBufferCapacity = 16)
+    val completedVoiceMessages = _completedVoiceMessages.asSharedFlow()
 
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
@@ -111,13 +156,14 @@ class MessagingViewModel(
     val config: StateFlow<VoiceConfig> = voiceConfig.asStateFlow()
 
     private var itemIdCounter = 0
-    private var voiceMessageIdSeq = (System.currentTimeMillis() % 65536).toInt()
     private var currentRecordingFile: File? = null
+    private var tickJob: Job? = null
 
     init {
         observeIncomingTextMessages()
         observeIncomingVoiceData()
         observeCompletedVoiceMessages()
+        startTickLoop()
 
         player.onCompletion = {
             _isPlaying.value = false
@@ -146,13 +192,31 @@ class MessagingViewModel(
     private fun observeIncomingVoiceData() {
         viewModelScope.launch {
             meshService.incomingDataMessages.collect { data ->
-                if (data.portNum == Portnums.PRIVATE_APP) {
-                    assembler.onChunkReceived(
+                if (data.portNum != Portnums.PRIVATE_APP) return@collect
+                val broadcast = data.to == "broadcast"
+                val toNode = if (broadcast) 0u
+                else (NodeIds.nodeIdToNum(data.to) ?: 0).toUInt()
+                val event = try {
+                    assembler.accept(
                         from = data.from,
-                        chunkData = data.payload,
-                        destinationId = data.to,
-                        channel = data.channel
+                        broadcast = broadcast,
+                        toNode = toNode,
+                        channel = data.channel.toUInt(),
+                        frame = data.payload,
                     )
+                } catch (t: Throwable) {
+                    Log.w(TAG, "assembler.accept threw", t)
+                    return@collect
+                }
+                when (event) {
+                    is AssemblyEvent.Complete -> _completedVoiceMessages.tryEmit(event.message)
+                    is AssemblyEvent.Rejected -> Log.d(TAG, "voice frame rejected: ${event.message}")
+                    is AssemblyEvent.Nack -> {
+                        // The peer is NACK-ing one of *our* messages. Send-side
+                        // retransmit isn't wired yet; just log.
+                        Log.d(TAG, "received NACK for messageId=${event.info.messageId}")
+                    }
+                    AssemblyEvent.Duplicate, is AssemblyEvent.Pending -> { /* no-op */ }
                 }
             }
         }
@@ -160,24 +224,68 @@ class MessagingViewModel(
 
     private fun observeCompletedVoiceMessages() {
         viewModelScope.launch {
-            assembler.completedMessages.collect { msg ->
-                val item = ChatItem.Voice(
-                    id = ++itemIdCounter,
-                    from = msg.from,
-                    to = msg.to,
-                    audioData = msg.audioData,
-                    timestamp = msg.timestamp,
-                    isOutgoing = false,
-                    isComplete = msg.isComplete,
-                    totalChunks = msg.totalChunks,
-                    receivedChunks = msg.receivedChunks,
-                    bitrateIndex = msg.bitrateIndex,
-                    channel = msg.channel,
-                    contactKey = computeContactKey(msg.from, msg.to, isOutgoing = false)
-                )
-                _allChatItems.value = _allChatItems.value + item
+            _completedVoiceMessages.collect { msg ->
+                _allChatItems.value = _allChatItems.value + msg.toChatItem()
             }
         }
+    }
+
+    /**
+     * Periodically drives the assembler's timeout / NACK state machine.
+     *
+     * `tick()` returns:
+     *  - `finalized`: messages whose timeout fired — surface partial audio
+     *    if [VoiceConfig.partialPlayOnTimeout] is set.
+     *  - `nacks`: NACK frames to transmit back to the sender of an
+     *    incomplete message.
+     */
+    private fun startTickLoop() {
+        tickJob = viewModelScope.launch {
+            while (true) {
+                delay(TICK_INTERVAL_MS)
+                val out = try {
+                    assembler.tick()
+                } catch (t: Throwable) {
+                    Log.w(TAG, "assembler.tick threw", t)
+                    continue
+                }
+                for (msg in out.finalized) {
+                    _completedVoiceMessages.tryEmit(msg)
+                }
+                for (nack in out.nacks) {
+                    val destId = nack.from // sender of the original message
+                    meshService.sendData(
+                        data = nack.frame,
+                        portNum = Portnums.PRIVATE_APP,
+                        destination = destId,
+                        channel = nack.channel.toInt(),
+                    )
+                }
+            }
+        }
+    }
+
+    private fun VoiceMessageOut.toChatItem(): ChatItem.Voice {
+        val toStr = if (broadcast) "broadcast" else NodeIds.nodeNumToId(toNode.toInt())
+        val bitrateIdx = when (val c = codec) {
+            VoiceCodec.AmrNb -> codecParam.toInt()
+            VoiceCodec.Opus, VoiceCodec.PcmS16Le -> 0
+            is VoiceCodec.Unknown -> c.raw.toInt()
+        }
+        return ChatItem.Voice(
+            id = ++itemIdCounter,
+            from = from,
+            to = toStr,
+            audioData = audio,
+            timestamp = timestampMs,
+            isOutgoing = false,
+            isComplete = isComplete,
+            totalChunks = totalData.toInt(),
+            receivedChunks = receivedData.toInt(),
+            bitrateIndex = bitrateIdx,
+            channel = channel.toInt(),
+            contactKey = computeContactKey(from, toStr, isOutgoing = false),
+        )
     }
 
     // ========== TEXT MESSAGING ==========
@@ -251,32 +359,49 @@ class MessagingViewModel(
 
     private suspend fun sendVoiceFile(file: File) {
         val audioData = file.readBytes()
-        val msgId = voiceMessageIdSeq++ and 0xFFFF
+        val cfg = voiceConfig.value
+        val myId = meshService.myNodeId.value ?: "me"
+        val fromNodeNum = NodeIds.nodeIdToNum(myId)?.toUInt() ?: 0u
 
-        val chunks = VoiceChunker.chunkAudio(
-            audioData = audioData,
-            messageId = msgId,
-            bitrate = voiceConfig.value.bitrate
-        )
+        val build = try {
+            buildMessage(
+                audio = audioData,
+                cfg = BuildConfig(
+                    messageId = randomMessageId(),
+                    streamSeq = 0u,
+                    codec = VoiceCodec.AmrNb,
+                    codecParam = cfg.bitrate.ordinal.toUByte(),
+                    chunkSize = DEFAULT_CHUNK_SIZE,
+                    parityCount = DEFAULT_PARITY_COUNT,
+                    lastInStream = true,
+                    channelPsk = null,
+                    fromNodeNum = fromNodeNum,
+                ),
+            )
+        } catch (t: Throwable) {
+            Log.e(TAG, "buildMessage failed", t)
+            file.delete()
+            return
+        }
 
         val destination = _selectedNode.value?.nodeId
         val channel = _selectedChannel.value
+        val frames = build.frames
 
         _sendingProgress.value = 0f
-        chunks.forEachIndexed { index, chunk ->
+        frames.forEachIndexed { index, frame ->
             meshService.sendData(
-                data = chunk,
+                data = frame,
                 portNum = Portnums.PRIVATE_APP,
                 destination = destination,
                 channel = channel
             )
-            _sendingProgress.value = (index + 1).toFloat() / chunks.size
+            _sendingProgress.value = (index + 1).toFloat() / frames.size
             delay(500)
         }
         _sendingProgress.value = null
 
         // Add to chat as outgoing voice item
-        val myId = meshService.myNodeId.value ?: "me"
         val toField = destination ?: "broadcast"
         val item = ChatItem.Voice(
             id = ++itemIdCounter,
@@ -285,9 +410,9 @@ class MessagingViewModel(
             audioData = audioData,
             isOutgoing = true,
             isComplete = true,
-            totalChunks = chunks.size,
-            receivedChunks = chunks.size,
-            bitrateIndex = voiceConfig.value.bitrate.ordinal,
+            totalChunks = build.totalData.toInt(),
+            receivedChunks = build.totalData.toInt(),
+            bitrateIndex = cfg.bitrate.ordinal,
             channel = channel,
             contactKey = computeContactKey(myId, toField, isOutgoing = true)
         )
@@ -371,7 +496,8 @@ class MessagingViewModel(
 
     override fun onCleared() {
         super.onCleared()
+        tickJob?.cancel()
         player.release()
-        assembler.destroy()
+        assembler.close()
     }
 }
