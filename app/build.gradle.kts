@@ -215,6 +215,16 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
+        // Feature flag for the Rust-bridge migration (see INTEGRATION.md
+        // → "Android-bridge phased migration"). When `false` (the
+        // default through PR 2), the legacy `MeshServiceManager` owns
+        // the Meshtastic state machine and the new
+        // `RustMeshSession`/`BleMeshTransport`/`UsbMeshTransportV2`
+        // classes are compiled but unused. PR 3 flips this to `true`
+        // and rewires the chat / settings ViewModels onto the
+        // UniFFI-backed `MeshService`.
+        buildConfigField("boolean", "USE_RUST_MESH_SERVICE", "false")
+
         // Only package the ABIs we actually cross-compile for. Without
         // this, the AGP packager will refuse the build because
         // `jniLibs.srcDir` is non-empty but some declared ABIs are
@@ -263,6 +273,11 @@ android {
     }
     buildFeatures {
         compose = true
+        // Needed for `BuildConfig.USE_RUST_MESH_SERVICE` (AGP 8+ default
+        // is `false`, which would drop the generated `BuildConfig`
+        // class and break compilation of `RustMeshSession`'s callers in
+        // PR 3).
+        buildConfig = true
     }
     testOptions {
         unitTests.isReturnDefaultValues = true
