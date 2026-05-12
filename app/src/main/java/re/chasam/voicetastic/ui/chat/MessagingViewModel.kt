@@ -4,8 +4,8 @@ import android.content.Context
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -16,6 +16,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import re.chasam.voicetastic.core.NodeIds
 import re.chasam.voicetastic.model.ChatItem
 import re.chasam.voicetastic.model.MeshNode
@@ -58,7 +59,7 @@ class MessagingViewModel(
         /** NACK window (ms). Mirrors `voicetastic_core::voice::NACK_WINDOW_MS`. */
         private const val NACK_WINDOW_MS: ULong = 1500uL
 
-        /** Tick cadence: half the NACK window, so retransmit requests fire promptly. */
+            /** Tick cadence: half the NACK window, so retransmit requests fire promptly. */
         private const val TICK_INTERVAL_MS: Long = 750L
 
         /** Per-message completion memory before duplicates are forgotten. */
@@ -242,7 +243,7 @@ class MessagingViewModel(
     private fun startTickLoop() {
         tickJob = viewModelScope.launch {
             while (true) {
-                delay(TICK_INTERVAL_MS)
+                kotlinx.coroutines.delay(TICK_INTERVAL_MS)
                 val out = try {
                     assembler.tick()
                 } catch (t: Throwable) {
@@ -343,7 +344,7 @@ class MessagingViewModel(
         _isRecording.value = false
 
         if (file != null && file.exists() && file.length() > 0) {
-            viewModelScope.launch {
+            viewModelScope.launch(Dispatchers.IO) {
                 sendVoiceFile(file)
             }
         }
@@ -360,7 +361,7 @@ class MessagingViewModel(
     }
 
     private suspend fun sendVoiceFile(file: File) {
-        val audioData = file.readBytes()
+        val audioData = withContext(Dispatchers.IO) { file.readBytes() }
         val cfg = voiceConfig.value
         val myId = meshService.myNodeId.value ?: "me"
         val fromNodeNum = NodeIds.nodeIdToNum(myId)?.toUInt() ?: 0u
@@ -399,7 +400,6 @@ class MessagingViewModel(
                 channel = channel
             )
             _sendingProgress.value = (index + 1).toFloat() / frames.size
-            delay(500)
         }
         _sendingProgress.value = null
 

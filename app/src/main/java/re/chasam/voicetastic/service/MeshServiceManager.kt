@@ -2,23 +2,21 @@ package re.chasam.voicetastic.service
 
 import android.annotation.SuppressLint
 import android.bluetooth.*
-import android.bluetooth.le.ScanCallback
-import android.bluetooth.le.ScanFilter
-import android.bluetooth.le.ScanResult
-import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.hardware.usb.UsbDevice
-import android.os.ParcelUuid
 import android.util.Log
 import com.geeksville.mesh.MeshProtos
 import com.geeksville.mesh.Portnums.PortNum
 import com.hoho.android.usbserial.driver.UsbSerialDriver
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import re.chasam.voicetastic.model.MeshNode
-import java.util.concurrent.ConcurrentLinkedQueue
+import uniffi.voicetastic.MeshConfigListener
+import uniffi.voicetastic.MeshConnectionState
+import uniffi.voicetastic.MeshDataListener
+import uniffi.voicetastic.MeshService
+import uniffi.voicetastic.MeshStateListener
+import uniffi.voicetastic.MeshTextListener
 
 /**
  * Manages direct BLE connection to a Meshtastic device.
@@ -39,19 +37,11 @@ class MeshServiceManager(private val context: Context) {
     data class IncomingData(val from: String, val to: String, val portNum: Int, val payload: ByteArray, val channel: Int = 0, val timestamp: Long = System.currentTimeMillis())
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val bleMutex = Mutex()  // Single mutex for all BLE GATT operations (read + write)
-
-    private var bluetoothGatt: BluetoothGatt? = null
-    private var toRadioChar: BluetoothGattCharacteristic? = null
-    private var fromRadioChar: BluetoothGattCharacteristic? = null
+    private val rustService: MeshService = MeshService()
+    private var rustSession: RustMeshSession? = null
 
     private var myNodeNum: Int = 0
 
-    // Queue for pending read results
-    private val readResultQueue = ConcurrentLinkedQueue<ByteArray?>()
-    private val readSemaphore = java.util.concurrent.Semaphore(0)
-    private val writeSemaphore = java.util.concurrent.Semaphore(0)
-    private val descriptorSemaphore = java.util.concurrent.Semaphore(0)
 
     // --- Public state flows ---
     private val _connectionState = MutableStateFlow("DISCONNECTED")
@@ -98,50 +88,117 @@ class MeshServiceManager(private val context: Context) {
     val activeTransport: StateFlow<TransportType> = _activeTransport.asStateFlow()
 
     init {
-        // Forward inbound `FromRadio` payloads from USB into the same
-        // protocol pipeline used by BLE.
+
         scope.launch {
-            usbTransport.incomingFromRadio.collect { bytes ->
-                try {
-                    val fromRadio = MeshProtos.FromRadio.parseFrom(bytes)
-                    handleFromRadio(fromRadio)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to parse FromRadio from USB (${bytes.size} B)", e)
+            rustService.setStateListener(object : MeshStateListener {
+                override fun onState(state: MeshConnectionState) {
+                _connectionState.value = when (state) {
+                    MeshConnectionState.CONNECTED, MeshConnectionState.READY -> "CONNECTED"
+                    MeshConnectionState.CONNECTING, MeshConnectionState.CONFIGURING -> "CONNECTING"
+                    MeshConnectionState.DISCONNECTED -> "DISCONNECTED"
+                }
+                if (state == MeshConnectionState.DISCONNECTED) {
+                    clearSessionState()
+                    _activeTransport.value = TransportType.NONE
+                    usbActive = false
                 }
             }
-        }
-        // Mirror USB connection state onto the unified _connectionState so
-        // existing UI keeps working without a second status indicator.
-        scope.launch {
-            usbTransport.state.collect { st ->
-                if (!usbActive) return@collect
-                _connectionState.value = when (st) {
-                    UsbMeshTransport.State.CONNECTED -> "CONNECTED"
-                    UsbMeshTransport.State.CONNECTING -> "CONNECTING"
-                    UsbMeshTransport.State.ERROR -> {
-                        // Transport-level failure (e.g. cable unplugged mid-IO).
-                        // Clear caches so the UI doesn't show stale data from
-                        // the now-gone radio.
-                        usbActive = false
-                        _activeTransport.value = TransportType.NONE
-                        clearSessionState()
-                        "DISCONNECTED"
-                    }
-                    UsbMeshTransport.State.DISCONNECTED -> {
-                        // USB went away — clear the active flag and wipe
-                        // per-session caches so a re-attach starts fresh.
-                        usbActive = false
-                        _activeTransport.value = TransportType.NONE
-                        clearSessionState()
-                        "DISCONNECTED"
-                    }
+            })
+
+            rustService.setTextListener(object : MeshTextListener {
+                override fun onText(message: uniffi.voicetastic.IncomingTextMsg) {
+                    val toId = if (message.to.toInt() == MeshtasticBle.BROADCAST_ADDR) "broadcast"
+                    else MeshtasticBle.nodeNumToId(message.to.toInt())
+                    _incomingTextMessages.tryEmit(
+                        IncomingText(
+                            from = message.fromId,
+                            to = toId,
+                            text = message.text,
+                            channel = message.channel.toInt(),
+                            timestamp = message.rxTime.toLong() * 1000L,
+                        )
+                    )
                 }
-                if (st == UsbMeshTransport.State.CONNECTED) {
-                    // No settle delay needed for USB — the port is already
-                    // open and DTR/RTS asserted by the time we get here.
-                    requestConfig()
+            })
+
+            rustService.setDataListener(object : MeshDataListener {
+                override fun onData(message: uniffi.voicetastic.IncomingDataMsg) {
+                    val fromId = MeshtasticBle.nodeNumToId(message.from.toInt())
+                    val toId = if (message.to.toInt() == MeshtasticBle.BROADCAST_ADDR) "broadcast"
+                    else MeshtasticBle.nodeNumToId(message.to.toInt())
+                    _incomingDataMessages.tryEmit(
+                        IncomingData(
+                            from = fromId,
+                            to = toId,
+                            portNum = message.portnum,
+                            payload = message.payload,
+                            channel = message.channel.toInt(),
+                            timestamp = message.rxTime.toLong() * 1000L,
+                        )
+                    )
                 }
+            })
+
+            rustService.setConfigListener(object : MeshConfigListener {
+                override fun onMyInfo(encoded: ByteArray) {
+                    runCatching { MeshProtos.MyNodeInfo.parseFrom(encoded) }
+                        .onSuccess { info ->
+                            myNodeNum = info.myNodeNum
+                            _myNodeId.value = MeshtasticBle.nodeNumToId(myNodeNum)
+                        }
+                }
+
+            override fun onNodeInfo(encoded: ByteArray) {
+                runCatching { MeshProtos.NodeInfo.parseFrom(encoded) }
+                    .onSuccess { ni ->
+                        val node = MeshNode(
+                            nodeId = MeshtasticBle.nodeNumToId(ni.num),
+                            longName = if (ni.hasUser()) ni.user.longName else "Unknown",
+                            shortName = if (ni.hasUser()) ni.user.shortName else "??",
+                            lastHeard = ni.lastHeard.toLong(),
+                            batteryLevel = if (ni.hasDeviceMetrics()) ni.deviceMetrics.batteryLevel.toInt() else null,
+                            snr = if (ni.snr != 0f) ni.snr else null,
+                        )
+                        nodeMap[ni.num] = node
+                        _nodes.value = nodeMap.values.toList()
+                        if (ni.num == myNodeNum && ni.hasUser()) _owner.value = ni.user
+                        if (ni.num == myNodeNum && ni.hasPosition()) _myPosition.value = ni.position
+                    }
             }
+
+            override fun onConfig(encoded: ByteArray) {
+                runCatching { MeshProtos.Config.parseFrom(encoded) }
+                    .onSuccess { handleConfig(it) }
+            }
+
+            override fun onChannel(encoded: ByteArray) {
+                runCatching { MeshProtos.Channel.parseFrom(encoded) }
+                    .onSuccess { ch ->
+                        val current = _channels.value.toMutableList()
+                        val idx = current.indexOfFirst { it.index == ch.index }
+                        if (idx >= 0) current[idx] = ch else current.add(ch)
+                        _channels.value = current
+                    }
+            }
+
+            override fun onOwner(encoded: ByteArray) {
+                runCatching { MeshProtos.User.parseFrom(encoded) }
+                    .onSuccess { _owner.value = it }
+            }
+
+            override fun onMetadata(encoded: ByteArray) {
+                runCatching { MeshProtos.DeviceMetadata.parseFrom(encoded) }
+                    .onSuccess { md ->
+                        if (md.firmwareVersion.isNotEmpty()) {
+                            _firmwareVersion.value = md.firmwareVersion
+                        }
+                    }
+            }
+
+                override fun onConfigComplete(nonce: UInt) {
+                    _configComplete.tryEmit(nonce.toInt())
+                }
+            })
         }
     }
 
@@ -160,21 +217,34 @@ class MeshServiceManager(private val context: Context) {
      * @return true if the open succeeded.
      */
     fun connectUsb(driver: UsbSerialDriver): Boolean {
-        if (bluetoothGatt != null) {
-            Log.i(TAG, "Switching from BLE to USB transport")
-            disconnectBle()
-        }
+        runCatching { rustSession?.close() }
+        rustSession = null
         usbActive = true
         _activeTransport.value = TransportType.USB
+        _connectionState.value = "CONNECTING"
         val ok = usbTransport.connect(driver)
         if (!ok) {
             usbActive = false
             _activeTransport.value = TransportType.NONE
+            _connectionState.value = "DISCONNECTED"
+            return false
+        }
+        runCatching {
+            rustSession = RustMeshSession.openUsb(rustService, usbTransport)
+        }.onFailure { t ->
+            Log.e(TAG, "Rust USB connect failed", t)
+            usbTransport.disconnect()
+            usbActive = false
+            _activeTransport.value = TransportType.NONE
+            _connectionState.value = "DISCONNECTED"
+            return false
         }
         return ok
     }
 
     fun disconnectUsb() {
+        runCatching { rustSession?.close() }
+        rustSession = null
         usbTransport.disconnect()
         usbActive = false
         _activeTransport.value = TransportType.NONE
@@ -263,331 +333,62 @@ class MeshServiceManager(private val context: Context) {
     private val nodeMap = mutableMapOf<Int, MeshNode>()
 
     val isConnected: Boolean
-        get() = _connectionState.value == "CONNECTED"
+        get() = _connectionState.value == "CONNECTED" || _connectionState.value == "CONNECTING"
 
-    // ==========  BLE SCANNING  ==========
 
-    private val scanCallback = object : ScanCallback() {
-        @SuppressLint("MissingPermission")
-        override fun onScanResult(callbackType: Int, result: ScanResult) {
-            val device = result.device
-            val current = _discoveredDevices.value.toMutableList()
-            if (current.none { it.address == device.address }) {
-                current.add(device)
-                _discoveredDevices.value = current
-                Log.i(TAG, "Found Meshtastic device: ${device.name ?: device.address}")
-            }
-        }
-
-        override fun onScanFailed(errorCode: Int) {
-            Log.e(TAG, "BLE scan failed: $errorCode")
-            _isScanning.value = false
-        }
-    }
+    // ==========  BLE SCANNING (UI placeholders)  ==========
 
     @SuppressLint("MissingPermission")
     fun startScan() {
-        val adapter = BluetoothAdapter.getDefaultAdapter() ?: return
-        val scanner = adapter.bluetoothLeScanner ?: return
-
-        _discoveredDevices.value = emptyList()
-        _isScanning.value = true
-
-        val filter = ScanFilter.Builder()
-            .setServiceUuid(ParcelUuid(MeshtasticBle.SERVICE_UUID))
-            .build()
-        val settings = ScanSettings.Builder()
-            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .build()
-
-        scanner.startScan(listOf(filter), settings, scanCallback)
-
-        scope.launch {
-            delay(15_000)
-            stopScan()
-        }
+        // Scanning is handled by the Rust bridge; this is a UI placeholder
+        // that may be revived if Rust-side scanning is exposed.
+        Log.d(TAG, "startScan called (Rust bridge handles discovery)")
     }
 
     @SuppressLint("MissingPermission")
     fun stopScan() {
-        try {
-            BluetoothAdapter.getDefaultAdapter()?.bluetoothLeScanner?.stopScan(scanCallback)
-        } catch (_: Exception) {}
-        _isScanning.value = false
+        // Scanning is handled by the Rust bridge; this is a UI placeholder.
+        Log.d(TAG, "stopScan called")
     }
 
     // ==========  BLE CONNECTION  ==========
 
     @SuppressLint("MissingPermission")
     fun connect(device: BluetoothDevice) {
-        // BLE and USB are mutually exclusive — drop USB if it was active.
-        if (usbActive) disconnectUsb()
-        _activeTransport.value = TransportType.BLE
-        stopScan()
         _connectionState.value = "CONNECTING"
-        Log.i(TAG, "Connecting to ${device.name ?: device.address}")
-        bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
-    }
-
-    fun bind() = startScan()
-
-    @SuppressLint("MissingPermission")
-    fun disconnect() {
-        // Tear down whichever transport is active.
-        if (usbActive) disconnectUsb()
-        disconnectBle()
-    }
-
-    @SuppressLint("MissingPermission")
-    private fun disconnectBle() {
-        stopPolling()
-        setupCompleted = false
-        try { bluetoothGatt?.disconnect() } catch (_: Exception) {}
-        try { bluetoothGatt?.close() } catch (_: Exception) {}
-        bluetoothGatt = null
-        toRadioChar = null
-        fromRadioChar = null
-        if (_activeTransport.value == TransportType.BLE) {
-            _activeTransport.value = TransportType.NONE
+        _activeTransport.value = TransportType.BLE
+        scope.launch {
+            runCatching {
+                rustSession?.close()
+                rustSession = RustMeshSession.openBle(context, rustService, device)
+            }.onFailure { t ->
+                Log.e(TAG, "Rust BLE connect failed", t)
+                rustSession = null
+                _activeTransport.value = TransportType.NONE
+                _connectionState.value = "DISCONNECTED"
+            }
         }
-        _connectionState.value = "DISCONNECTED"
-        clearSessionState()
-        Log.i(TAG, "Disconnected (BLE)")
     }
+
+    fun disconnect() {
+        runCatching { rustSession?.close() }
+        rustSession = null
+        if (usbActive) usbTransport.disconnect()
+        usbActive = false
+        _activeTransport.value = TransportType.NONE
+        _connectionState.value = "DISCONNECTED"
+    }
+
 
     fun unbind() = disconnect()
 
     fun destroy() {
         disconnect()
         usbTransport.destroy()
+        runCatching { rustService.close() }
         scope.cancel()
     }
 
-    private var serviceDiscoveryRetries = 0
-    private val maxServiceDiscoveryRetries = 3
-
-    /**
-     * Clears the BLE GATT cache via reflection.
-     * This is a standard Android workaround for stale GATT service data.
-     */
-    @SuppressLint("MissingPermission")
-    private fun refreshGattCache(gatt: BluetoothGatt): Boolean {
-        return try {
-            val method = gatt.javaClass.getMethod("refresh")
-            method.invoke(gatt) as? Boolean ?: false
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to refresh GATT cache", e)
-            false
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private val gattCallback = object : BluetoothGattCallback() {
-
-        override fun onConnectionStateChange(gatt: BluetoothGatt, status: Int, newState: Int) {
-            when (newState) {
-                BluetoothGatt.STATE_CONNECTED -> {
-                    Log.i(TAG, "GATT connected, refreshing cache and requesting MTU")
-                    serviceDiscoveryRetries = 0
-                    refreshGattCache(gatt)
-                    // Small delay to let the cache clear take effect
-                    scope.launch {
-                        delay(600)
-                        gatt.requestMtu(MTU_SIZE)
-                    }
-                }
-                BluetoothGatt.STATE_DISCONNECTED -> {
-                    Log.w(TAG, "GATT disconnected (status=$status)")
-                    _connectionState.value = "DISCONNECTED"
-                }
-            }
-        }
-
-        override fun onMtuChanged(gatt: BluetoothGatt, mtu: Int, status: Int) {
-            Log.i(TAG, "MTU changed to $mtu")
-            gatt.discoverServices()
-        }
-
-        override fun onServicesDiscovered(gatt: BluetoothGatt, status: Int) {
-            if (status != BluetoothGatt.GATT_SUCCESS) {
-                Log.e(TAG, "Service discovery failed: $status")
-                return
-            }
-
-            val service = gatt.getService(MeshtasticBle.SERVICE_UUID)
-            if (service == null) {
-                Log.e(TAG, "Meshtastic BLE service not found")
-                scope.launch { disconnect() }
-                return
-            }
-
-            toRadioChar = service.getCharacteristic(MeshtasticBle.TORADIO_UUID)
-            fromRadioChar = service.getCharacteristic(MeshtasticBle.FROMRADIO_UUID)
-            val fromNumChar = service.getCharacteristic(MeshtasticBle.FROMNUM_UUID)
-
-            if (toRadioChar == null || fromRadioChar == null) {
-                Log.e(TAG, "Missing required BLE characteristics: " +
-                    "toRadio=${toRadioChar != null}, fromRadio=${fromRadioChar != null}")
-
-                if (serviceDiscoveryRetries < maxServiceDiscoveryRetries) {
-                    serviceDiscoveryRetries++
-                    Log.w(TAG, "Retrying service discovery (attempt $serviceDiscoveryRetries/$maxServiceDiscoveryRetries)")
-                    scope.launch {
-                        delay(1000L * serviceDiscoveryRetries)
-                        refreshGattCache(gatt)
-                        delay(500)
-                        gatt.discoverServices()
-                    }
-                    return
-                }
-
-                Log.e(TAG, "All retries exhausted, disconnecting")
-                scope.launch { disconnect() }
-                return
-            }
-
-            // Enable notifications: prefer FromNum if available (legacy firmware),
-            // otherwise subscribe to FromRadio notifications (firmware 2.5+)
-            val notifyChar = fromNumChar ?: fromRadioChar!!
-            if (fromNumChar != null) {
-                Log.i(TAG, "Subscribing to FromNum notifications (legacy mode)")
-            } else {
-                Log.i(TAG, "FromNum not available, subscribing to FromRadio notifications (firmware 2.5+)")
-            }
-
-            gatt.setCharacteristicNotification(notifyChar, true)
-            val descriptor = notifyChar.getDescriptor(MeshtasticBle.CCCD_UUID)
-            if (descriptor != null) {
-                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
-                gatt.writeDescriptor(descriptor)
-            } else {
-                // No descriptor, proceed anyway
-                onSetupComplete()
-            }
-        }
-
-        override fun onDescriptorWrite(gatt: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int) {
-            Log.i(TAG, "Descriptor write status=$status")
-            descriptorSemaphore.release()
-            onSetupComplete()
-        }
-
-        override fun onCharacteristicRead(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray,
-            status: Int
-        ) {
-            if (status == BluetoothGatt.GATT_SUCCESS && characteristic.uuid == MeshtasticBle.FROMRADIO_UUID) {
-                readResultQueue.add(value)
-            } else {
-                readResultQueue.add(null)
-            }
-            readSemaphore.release()
-        }
-
-        @Deprecated("Deprecated in API 33")
-        override fun onCharacteristicRead(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            if (status == BluetoothGatt.GATT_SUCCESS && characteristic.uuid == MeshtasticBle.FROMRADIO_UUID) {
-                readResultQueue.add(characteristic.value)
-            } else {
-                readResultQueue.add(null)
-            }
-            readSemaphore.release()
-        }
-
-        override fun onCharacteristicWrite(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int) {
-            writeSemaphore.release()
-        }
-
-        override fun onCharacteristicChanged(
-            gatt: BluetoothGatt,
-            characteristic: BluetoothGattCharacteristic,
-            value: ByteArray
-        ) {
-            if (characteristic.uuid == MeshtasticBle.FROMNUM_UUID) {
-                // Legacy firmware: FromNum notifies that new data is available
-                scope.launch { readAllFromRadio() }
-            } else if (characteristic.uuid == MeshtasticBle.FROMRADIO_UUID) {
-                // Firmware 2.5+: FromRadio notifies directly with data
-                scope.launch {
-                    if (value.isNotEmpty()) {
-                        try {
-                            val fromRadio = MeshProtos.FromRadio.parseFrom(value)
-                            handleFromRadio(fromRadio)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Failed to parse FromRadio notification", e)
-                        }
-                    }
-                    // There may be more queued, read remaining
-                    readAllFromRadio()
-                }
-            }
-        }
-
-        @Deprecated("Deprecated in API 33")
-        override fun onCharacteristicChanged(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
-            if (characteristic.uuid == MeshtasticBle.FROMNUM_UUID) {
-                scope.launch { readAllFromRadio() }
-            } else if (characteristic.uuid == MeshtasticBle.FROMRADIO_UUID) {
-                val value = characteristic.value
-                scope.launch {
-                    if (value != null && value.isNotEmpty()) {
-                        try {
-                            val fromRadio = MeshProtos.FromRadio.parseFrom(value)
-                            handleFromRadio(fromRadio)
-                        } catch (e: Exception) {
-                            Log.e(TAG, "Failed to parse FromRadio notification", e)
-                        }
-                    }
-                    readAllFromRadio()
-                }
-            }
-        }
-    }
-
-    private var pollingJob: Job? = null
-    private var setupCompleted: Boolean = false
-
-    private fun onSetupComplete() {
-        // Guard against duplicate invocations (descriptor write callback can
-        // fire more than once on reconnect; calling requestConfig in a loop
-        // would hammer the firmware with redundant want_config_id packets).
-        if (setupCompleted) return
-        setupCompleted = true
-        _connectionState.value = "CONNECTED"
-        Log.i(TAG, "BLE setup complete, requesting config")
-        scope.launch {
-            delay(300)
-            requestConfig()
-        }
-        startPolling()
-    }
-
-    /**
-     * Start a periodic polling loop that reads queued messages from the device.
-     * This acts as a safety net in case BLE notifications are missed or coalesced.
-     */
-    private fun startPolling() {
-        pollingJob?.cancel()
-        pollingJob = scope.launch {
-            while (isActive) {
-                delay(POLL_INTERVAL_MS)
-                if (isConnected) {
-                    try {
-                        readAllFromRadio()
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Polling read failed", e)
-                    }
-                }
-            }
-        }
-    }
-
-    private fun stopPolling() {
-        pollingJob?.cancel()
-        pollingJob = null
-    }
 
     // ==========  MESHTASTIC PROTOCOL  ==========
 
@@ -597,85 +398,8 @@ class MeshServiceManager(private val context: Context) {
      */
     fun refreshConfig() {
         if (!isConnected) return
-        scope.launch { requestConfig() }
-    }
-
-    private suspend fun requestConfig() {
-        // configId must be non-zero — firmware ignores want_config_id == 0.
-        val configId = ((System.currentTimeMillis().toInt() and 0x7fffffff)).coerceAtLeast(1)
-        pendingConfigId = configId
-        Log.i(TAG, "Requesting full config (id=$configId)")
-        // NOTE: do NOT null out the cached configs here. If we did, and the
-        // user pressed "Apply" before the refresh completes, we would write
-        // back default/zero values that can crash the radio task on the
-        // firmware (and trigger a watchdog bootloop).
-        val toRadio = MeshProtos.ToRadio.newBuilder()
-            .setWantConfigId(configId)
-            .build()
-        // On USB, re-arm protocol mode before each refresh: the firmware
-        // can have lapsed back into debug-log output if it's been idle for
-        // a while or rebooted spontaneously, in which case `want_config_id`
-        // would be silently swallowed. The wake sequence is a no-op when
-        // the device is already in protocol mode, so it's always safe.
-        if (usbActive) usbTransport.wake()
-        writeToRadio(toRadio)
-        // USB is push-driven: FromRadio bytes stream in via the SerialIo
-        // listener and land in handleFromRadio() as soon as the firmware
-        // emits them. No polling needed → returning here makes refresh
-        // feel instant instead of waiting ~2s for BLE-style drains that
-        // would all be no-ops (readAllFromRadio short-circuits when gatt
-        // is null).
-        if (usbActive) return
-        // BLE: drain whatever the firmware queued in response.
-        delay(500)
-        readAllFromRadio()
-        // Some firmwares enqueue the burst lazily; do a couple more drains.
-        repeat(3) {
-            delay(500)
-            readAllFromRadio()
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    private suspend fun readAllFromRadio() {
-        val gatt = bluetoothGatt ?: return
-        val char = fromRadioChar ?: return
-
-        bleMutex.withLock {
-            var attempts = 0
-            var packetsRead = 0
-            while (attempts < 100) {
-                readSemaphore.drainPermits()
-                readResultQueue.clear()
-
-                if (!gatt.readCharacteristic(char)) {
-                    Log.w(TAG, "readCharacteristic(FromRadio) returned false (attempt=$attempts)")
-                    break
-                }
-
-                // Wait for callback
-                if (!readSemaphore.tryAcquire(2, java.util.concurrent.TimeUnit.SECONDS)) {
-                    Log.w(TAG, "readCharacteristic(FromRadio) timed out after 2s (attempt=$attempts)")
-                    break
-                }
-
-                val data = readResultQueue.poll()
-                if (data == null || data.isEmpty()) break  // queue drained, normal exit
-
-                try {
-                    val fromRadio = MeshProtos.FromRadio.parseFrom(data)
-                    handleFromRadio(fromRadio)
-                    packetsRead++
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to parse FromRadio (${data.size} bytes)", e)
-                }
-                attempts++
-                delay(50)
-            }
-            if (packetsRead > 0) {
-                Log.d(TAG, "readAllFromRadio drained $packetsRead packet(s)")
-            }
-        }
+        runCatching { rustService.refreshConfig() }
+            .onFailure { Log.e(TAG, "refreshConfig failed", it) }
     }
 
     private fun handleFromRadio(fromRadio: MeshProtos.FromRadio) {
@@ -871,45 +595,6 @@ class MeshServiceManager(private val context: Context) {
 
     // ==========  SENDING  ==========
 
-    @SuppressLint("MissingPermission")
-    private suspend fun writeToRadio(toRadio: MeshProtos.ToRadio) {
-        val bytes = toRadio.toByteArray()
-
-        // USB path: synchronous-ish framed write, no GATT semaphores needed.
-        if (usbActive) {
-            val ok = usbTransport.write(bytes)
-            if (!ok) Log.w(TAG, "USB writeToRadio failed (${bytes.size} bytes)")
-            else Log.d(TAG, "USB ToRadio write success (${bytes.size} bytes)")
-            return
-        }
-
-        val gatt = bluetoothGatt ?: return
-        val char = toRadioChar ?: return
-
-        bleMutex.withLock {
-            writeSemaphore.drainPermits()
-            val initiated = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeCharacteristic(char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) == BluetoothStatusCodes.SUCCESS
-            } else {
-                @Suppress("DEPRECATION")
-                char.value = bytes
-                @Suppress("DEPRECATION")
-                char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-                @Suppress("DEPRECATION")
-                gatt.writeCharacteristic(char)
-            }
-            if (initiated) {
-                if (!writeSemaphore.tryAcquire(2, java.util.concurrent.TimeUnit.SECONDS)) {
-                    Log.w(TAG, "Write timeout waiting for callback (${bytes.size} bytes)")
-                } else {
-                    Log.d(TAG, "ToRadio write success (${bytes.size} bytes)")
-                }
-            } else {
-                Log.e(TAG, "Failed to initiate BLE write ToRadio (${bytes.size} bytes)")
-            }
-        }
-    }
-
     fun sendText(text: String, destination: String? = null, channel: Int = 0): Boolean {
         if (!isConnected) return false
 
@@ -922,25 +607,13 @@ class MeshServiceManager(private val context: Context) {
             MeshtasticBle.BROADCAST_ADDR
         }
 
-        val data = MeshProtos.Data.newBuilder()
-            .setPortnum(PortNum.TEXT_MESSAGE_APP)
-            .setPayload(com.google.protobuf.ByteString.copyFromUtf8(text))
-            .build()
-
-        val packet = MeshProtos.MeshPacket.newBuilder()
-            .setTo(destNum)
-            .setChannel(channel)
-            .setDecoded(data)
-            .setWantAck(true)
-            .build()
-
-        val toRadio = MeshProtos.ToRadio.newBuilder()
-            .setPacket(packet)
-            .build()
-
-        scope.launch { writeToRadio(toRadio) }
-        Log.i(TAG, "Sending text to ${destination ?: "broadcast"} (dest=$destNum): $text")
-        return true
+        return try {
+            rustService.sendText(text, channel.toUInt(), destNum.toUInt())
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "sendText failed", e)
+            false
+        }
     }
 
     fun sendData(data: ByteArray, portNum: Int, destination: String? = null, channel: Int = 0): Boolean {
@@ -955,63 +628,28 @@ class MeshServiceManager(private val context: Context) {
             MeshtasticBle.BROADCAST_ADDR
         }
 
-        val meshData = MeshProtos.Data.newBuilder()
-            .setPortnumValue(portNum)
-            .setPayload(com.google.protobuf.ByteString.copyFrom(data))
-            .build()
-
-        val packet = MeshProtos.MeshPacket.newBuilder()
-            .setTo(destNum)
-            .setChannel(channel)
-            .setDecoded(meshData)
-            .setWantAck(true)
-            .build()
-
-        val toRadio = MeshProtos.ToRadio.newBuilder()
-            .setPacket(packet)
-            .build()
-
-        scope.launch { writeToRadio(toRadio) }
-        Log.i(TAG, "Sending data (port=$portNum, ${data.size} bytes) to ${destination ?: "broadcast"}")
-        return true
+        return try {
+            rustService.sendData(portNum, data, channel.toUInt(), destNum.toUInt(), true)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "sendData failed", e)
+            false
+        }
     }
+
 
     // ==========  ADMIN CONFIG WRITES (local node only)  ==========
 
     private fun sendAdminMessage(admin: MeshProtos.AdminMessage): Boolean {
-        if (!isConnected) {
-            Log.w(TAG, "sendAdminMessage refused: not connected (state=${_connectionState.value}, transport=${_activeTransport.value})")
-            return false
+        return try {
+            rustService.writeAdmin(admin.toByteArray())
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "sendAdminMessage failed", e)
+            false
         }
-        if (myNodeNum == 0) {
-            // We're connected but the firmware never reported MyNodeInfo (or
-            // we lost it on a transport switch). Without a destination node
-            // number the admin packet has nowhere to go. Kick a refresh so
-            // the next attempt has a chance to succeed.
-            Log.w(TAG, "sendAdminMessage refused: myNodeNum=0 — re-requesting config")
-            scope.launch { requestConfig() }
-            return false
-        }
-
-        val data = MeshProtos.Data.newBuilder()
-            .setPortnum(PortNum.ADMIN_APP)
-            .setPayload(admin.toByteString())
-            .setWantResponse(true)
-            .build()
-
-        val packet = MeshProtos.MeshPacket.newBuilder()
-            .setTo(myNodeNum)
-            .setDecoded(data)
-            .setWantAck(true)
-            .build()
-
-        val toRadio = MeshProtos.ToRadio.newBuilder()
-            .setPacket(packet)
-            .build()
-
-        scope.launch { writeToRadio(toRadio) }
-        return true
     }
+
 
     /**
      * Write a Config section (LoRa, Device, Position, Power, Network, Display, Bluetooth)
@@ -1094,21 +732,5 @@ class MeshServiceManager(private val context: Context) {
             .setFactoryResetConfig(1)
             .build()
         return sendAdminMessage(admin)
-    }
-
-    // ==========  LEGACY CONFIG ACCESSORS  ==========
-
-    fun getRadioConfig(): ByteArray? = _radioConfig.value?.toByteArray()
-
-    fun setRadioConfig(config: ByteArray): Boolean {
-        Log.i(TAG, "setRadioConfig: ${config.size} bytes")
-        return isConnected
-    }
-
-    fun getChannels(): ByteArray? = null
-
-    fun setChannels(channels: ByteArray): Boolean {
-        Log.i(TAG, "setChannels: ${channels.size} bytes")
-        return isConnected
     }
 }

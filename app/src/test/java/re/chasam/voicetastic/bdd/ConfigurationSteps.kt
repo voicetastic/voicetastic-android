@@ -43,8 +43,6 @@ class ConfigurationSteps {
         every { meshService.owner } returns MutableStateFlow(null)
         every { meshService.channels } returns MutableStateFlow(emptyList())
         every { meshService.moduleConfigs } returns MutableStateFlow(emptyMap())
-        every { meshService.setRadioConfig(any()) } returns true
-        every { meshService.getRadioConfig() } returns """{"region":"US"}""".toByteArray()
         every { meshService.writeConfig(any()) } returns true
         every { meshService.writeOwner(any()) } returns true
         every { meshService.writeChannel(any()) } returns true

@@ -215,15 +215,8 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
-        // Feature flag for the Rust-bridge migration (see INTEGRATION.md
-        // → "Android-bridge phased migration"). When `false` (the
-        // default through PR 2), the legacy `MeshServiceManager` owns
-        // the Meshtastic state machine and the new
-        // `RustMeshSession`/`BleMeshTransport`/`UsbMeshTransportV2`
-        // classes are compiled but unused. PR 3 flips this to `true`
-        // and rewires the chat / settings ViewModels onto the
-        // UniFFI-backed `MeshService`.
-        buildConfigField("boolean", "USE_RUST_MESH_SERVICE", "false")
+        // PR3 default: runtime mesh traffic is driven by the Rust bridge.
+        buildConfigField("boolean", "USE_RUST_MESH_SERVICE", "true")
 
         // Only package the ABIs we actually cross-compile for. Without
         // this, the AGP packager will refuse the build because
