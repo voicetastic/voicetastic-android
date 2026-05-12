@@ -42,47 +42,42 @@ mesh until the Android side adopts v2.
 
 ---
 
-## 2. What this PR did
+## 2. What this PR did (historical — most seam files since removed)
 
 A **pure-Kotlin** package `re.chasam.voicetastic.core` was introduced as
-the Android-side mirror of the Rust core's public surface. Nothing was
-moved into a separate Gradle module yet — that split is straightforward
-and can happen once the integration approach (JNI vs. UniFFI vs. straight
-port) is locked in.
+the Android-side mirror of the Rust core's public surface. With the
+UniFFI integration now complete (PRs 2–5), most of these seam files have
+been **removed** — the Rust bridge is the real implementation.
 
-### New files (production)
+### Files introduced (production)
 
-| File                                                                                                  | Mirrors Rust source                  |
-|-------------------------------------------------------------------------------------------------------|--------------------------------------|
-| `app/src/main/java/re/chasam/voicetastic/core/Clock.kt`                                               | `chrono::Utc::now` usage             |
-| `app/src/main/java/re/chasam/voicetastic/core/Logger.kt`                                              | `tracing` usage                      |
-| `app/src/main/java/re/chasam/voicetastic/core/NodeIds.kt`                                             | `ids.rs`                             |
-| `app/src/main/java/re/chasam/voicetastic/core/Ports.kt`                                               | `ports.rs`                           |
-| `app/src/main/java/re/chasam/voicetastic/core/VoiceProtocol.kt`                                       | `voice/consts.rs`, `voice/mod.rs`    |
-| `app/src/main/java/re/chasam/voicetastic/core/MeshTransport.kt`                                       | `transport.rs` (`Transport` trait)   |
-| `app/src/main/java/re/chasam/voicetastic/core/ConnectionState.kt`                                     | `service/types.rs`                   |
-| `app/src/main/java/re/chasam/voicetastic/core/MeshService.kt`                                         | `service/mod.rs` (facade contract)   |
+> **Status key:** ✅ retained — ❌ removed (superseded by UniFFI bridge)
+
+| File                                                 | Mirrors Rust source    | Status |
+|------------------------------------------------------|------------------------|--------|
+| `core/Clock.kt`                                      | `chrono::Utc::now`     | ❌     |
+| `core/Logger.kt`                                     | `tracing`              | ❌     |
+| `core/NodeIds.kt`                                    | `ids.rs`               | ✅     |
+| `core/Ports.kt`                                      | `ports.rs`             | ✅     |
+| `core/VoiceProtocol.kt`                              | `voice/consts.rs`      | ❌     |
+| `core/MeshTransport.kt`                              | `transport.rs`         | ❌     |
+| `core/ConnectionState.kt`                            | `service/types.rs`     | ❌     |
+| `core/MeshService.kt`                                | `service/mod.rs`       | ❌     |
 
 ### Refactored existing files
 
 - `service/MeshtasticBle.kt` — `nodeNumToId` / `nodeIdToNum` / `BROADCAST_ADDR` now delegate to `core.NodeIds`; UUIDs stay (platform-specific).
 - `service/Portnums.kt` — re-exports of `core.Ports`; adds `MAX_TEXT_BYTES`. Callers compile unchanged.
-- `voice/VoiceAssembler.kt` — accepts an injected `Clock` and `Logger`; defaults preserve the current Android behaviour (System clock + `android.util.Log`). Internal `Log.*` calls and `System.currentTimeMillis()` are routed through the seam.
 
-### New tests (18, all passing)
+### Tests
 
-| File                                                                                                       | What it locks in                                            |
-|------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------|
-| `app/src/test/.../core/NodeIdsTest.kt`                                                                     | Round-trip + every malformed-input branch from Rust `ids.rs` |
-| `app/src/test/.../core/PortsTest.kt`                                                                       | Raw literal values vs. Meshtastic wire                       |
-| `app/src/test/.../core/VoiceProtocolTest.kt`                                                               | v1 and v2 geometry constants                                 |
-| `app/src/test/.../core/ClockAndLoggerTest.kt`                                                              | Fake / recording fixtures behave                             |
-| `app/src/test/.../core/FakeMeshTransport.kt` + `MeshTransportContractTest.kt`                              | Reusable loopback fixture + contract suite for any `MeshTransport` impl |
-| `app/src/test/.../voice/VoiceAssemblerInjectionTest.kt`                                                    | The new `Clock`/`Logger` seam is wired correctly             |
-
-The existing test suite (Voice chunker/assembler/framing/portnums/config — 60 tests) continues to pass without modification.
-
-**Total: 78 unit tests, 0 failures.**
+| File                                               | Status |
+|----------------------------------------------------|--------|
+| `core/NodeIdsTest.kt`                              | ✅     |
+| `core/PortsTest.kt`                                | ✅     |
+| `core/VoiceProtocolTest.kt`                        | ❌     |
+| `core/ClockAndLoggerTest.kt`                       | ❌     |
+| `core/FakeMeshTransport.kt` + `MeshTransportContractTest.kt` | ❌ |
 
 ---
 
@@ -133,48 +128,22 @@ Per option, what each implies:
   `NodeInfo`, `User`, `Channel`, `Config`, `ModuleConfig`, `Routing`
   (the javalite plugin compiles them automatically).
 
-### Option A — UniFFI (recommended)
+### Option A — UniFFI ✅ (chosen and implemented)
 
 Mozilla's [`uniffi-rs`](https://github.com/mozilla/uniffi-rs) generates a
-Kotlin wrapper from a `.udl` file describing the public Rust API. It
-already supports `async fn`, `Result<T, E>`, `Vec<u8>`, and lets you
-expose a Kotlin-implemented `Transport` interface back to the Rust side
-via `[Trait, with_foreign]`.
+Kotlin wrapper from a `.udl` file describing the public Rust API. The
+bridge crate lives at
+`third_party/voicetastic-desktop/crates/voicetastic-android-bridge/`
+and the UDL definition is `src/voicetastic.udl`.
 
-**Pros:** type-safe, generated bindings, works with Kotlin coroutines via
-`uniffi-bindgen-kotlin-multiplatform`. **Cons:** adds a code-gen step.
-
-Outline:
-
-1. Add a `voicetastic-android-bridge` crate in the desktop workspace
-   (or vendor a copy) that depends on `voicetastic-core` with
-   `default-features = false` (no btleplug, no tokio-serial) and exposes
-   a slimmed-down UniFFI scenario:
-   ```udl
-   namespace voicetastic { };
-   [Trait, with_foreign]
-   interface Transport {
-       [Async, Throws=CoreError] void write_to_radio(bytes data);
-       [Async] void disconnect();
-   };
-   interface MeshService {
-       constructor();
-       [Async, Throws=CoreError]
-       void connect_with_transport(Transport t, bytes inbound, u64 settle_ms);
-       // …watch_state, send_text, send_data, refresh_config, disconnect…
-   };
-   ```
-2. Build for Android targets: `aarch64-linux-android`, `armv7-linux-androideabi`,
-   `x86_64-linux-android`, `i686-linux-android` (e.g. via `cargo-ndk` from a
-   Gradle task).
-3. Bundle the resulting `.so`s under `app/src/main/jniLibs/<abi>/` and the
-   generated Kotlin under `app/src/main/java/uniffi/voicetastic/`.
-4. Have the bridge's generated `MeshService` implement the Kotlin
-   [`MeshService`](app/src/main/java/re/chasam/voicetastic/core/MeshService.kt)
-   interface introduced in this PR (or write a thin adapter), and have a
-   Kotlin `BleMeshTransport` / `UsbMeshTransport` adapter implement
-   [`MeshTransport`](app/src/main/java/re/chasam/voicetastic/core/MeshTransport.kt)
-   on top of `MeshServiceManager` / `UsbMeshTransport`.
+Key adapters:
+- `BleMeshTransport` — Kotlin class implementing the UniFFI `MeshTransport`
+  foreign trait for BLE GATT.
+- `UsbMeshTransportV2` — same, wrapping the legacy `UsbMeshTransport`.
+- `RustMeshSession` — lifecycle owner tying a transport + sink to the
+  Rust `MeshService`.
+- `MeshServiceManager` — registers Rust-side listeners (state, text,
+  data, config) and routes all send/admin calls through the bridge.
 
 ### Option B — Raw JNI
 
@@ -192,56 +161,32 @@ protocol change must be ported twice.
 
 ---
 
-## 4. Concrete next steps
+## 4. Integration progress
 
-1. **Pick A / B / C** (recommendation: A).
-2. **Split into Gradle modules:** `:core` (pure JVM, holds today's
-   `re.chasam.voicetastic.core.*`), `:platform-android` (BLE/USB
-   transport adapters + audio I/O), `:app` (UI + Activity). The current
-   single-module layout was kept to minimise diff size.
-3. **Wire the upstream crate:**
-   - Add a `voicetastic-core` git submodule or vendor it at
-     `third_party/voicetastic-core`.
-   - Add `cargo-ndk` Gradle integration (e.g. via
-     [`mozilla/rust-android-gradle`](https://github.com/mozilla/rust-android-gradle)).
-   - Generate UniFFI bindings into `:core`.
-4. **Adapt `MeshServiceManager`:**
-   - Extract its BLE half into `BleMeshTransport : MeshTransport`.
-   - Extract its USB half — already present in
-     [`UsbMeshTransport`](app/src/main/java/re/chasam/voicetastic/service/UsbMeshTransport.kt) — into `UsbMeshTransport : MeshTransport`.
-   - Delete the rest; `MeshService` (now Rust-backed) owns the
-     `WantConfigId` handshake, packet dedup, state machine.
-5. **Adopt voice protocol v2:**
-   - Replace `VoiceChunker` / `VoiceAssembler` with calls into
-     `voicetastic_core::voice::{build_message, VoiceAssembler}`.
-   - The `Clock` / `Logger` seam added in this PR makes the existing
-     pure-logic tests easy to repoint at the new implementation.
-6. **CI:** add a Rust toolchain layer to `.gitlab-ci.yml` that runs
-   `cargo test -p voicetastic-core` before `./gradlew :app:testDebugUnitTest`.
+Steps 1–4 are **done**. Step 5 is the remaining item.
 
----
+1. ~~**Pick A / B / C**~~ → **A (UniFFI)** was chosen.
+2. ~~**Wire the upstream crate**~~ — done in PR 2. The desktop repo is a
+   git submodule at `third_party/voicetastic-desktop`; a Gradle task
+   runs `uniffi-bindgen` and cross-compiles the bridge crate for
+   `aarch64-linux-android` / `x86_64-linux-android`.
+3. ~~**Adapt `MeshServiceManager`**~~ — done across PRs 2–4:
+   - BLE extracted → `BleMeshTransport` (PR 2).
+   - USB extracted → `UsbMeshTransportV2` wrapping legacy `UsbMeshTransport` (PR 2).
+   - Send path routed through Rust (PR 3).
+   - Listeners wired to Rust bridge callbacks (PR 3).
+   - Dead legacy inbound handlers removed (PR 4).
+4. ~~**Remove scaffolding**~~ — done in PR 5. The `core/` seam package
+   is reduced to `NodeIds.kt` and `Ports.kt`; everything else was
+   superseded by the UniFFI-generated bindings.
+5. **Adopt voice protocol v2** — TODO. Replace `VoiceChunker` /
+   `VoiceAssembler` with `MeshService.sendVoice` and the Rust core's
+   `voice::VoiceAssembler`.
+6. ~~**CI**~~ — Rust toolchain and `cargo test` are part of `.gitlab-ci.yml`.
 
-## 5. Files touched in this PR
+### Known gap
 
-```
-A  app/src/main/java/re/chasam/voicetastic/core/Clock.kt
-A  app/src/main/java/re/chasam/voicetastic/core/Logger.kt
-A  app/src/main/java/re/chasam/voicetastic/core/NodeIds.kt
-A  app/src/main/java/re/chasam/voicetastic/core/Ports.kt
-A  app/src/main/java/re/chasam/voicetastic/core/VoiceProtocol.kt
-A  app/src/main/java/re/chasam/voicetastic/core/MeshTransport.kt
-A  app/src/main/java/re/chasam/voicetastic/core/ConnectionState.kt
-A  app/src/main/java/re/chasam/voicetastic/core/MeshService.kt
-M  app/src/main/java/re/chasam/voicetastic/service/MeshtasticBle.kt
-M  app/src/main/java/re/chasam/voicetastic/service/Portnums.kt
-M  app/src/main/java/re/chasam/voicetastic/voice/VoiceAssembler.kt
-A  app/src/test/java/re/chasam/voicetastic/core/NodeIdsTest.kt
-A  app/src/test/java/re/chasam/voicetastic/core/PortsTest.kt
-A  app/src/test/java/re/chasam/voicetastic/core/VoiceProtocolTest.kt
-A  app/src/test/java/re/chasam/voicetastic/core/ClockAndLoggerTest.kt
-A  app/src/test/java/re/chasam/voicetastic/core/FakeMeshTransport.kt
-A  app/src/test/java/re/chasam/voicetastic/core/MeshTransportContractTest.kt
-A  app/src/test/java/re/chasam/voicetastic/voice/VoiceAssemblerInjectionTest.kt
-A  INTEGRATION.md
-```
+`moduleConfigs` StateFlow is no longer populated — the Rust bridge's
+`MeshConfigListener` does not expose a module-config callback yet.
+Adding it requires an upstream UDL addition in `voicetastic-desktop`.
 
