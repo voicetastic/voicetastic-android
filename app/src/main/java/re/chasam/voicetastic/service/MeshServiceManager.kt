@@ -6,7 +6,6 @@ import android.content.Context
 import android.hardware.usb.UsbDevice
 import android.util.Log
 import com.geeksville.mesh.MeshProtos
-import com.geeksville.mesh.Portnums.PortNum
 import com.hoho.android.usbserial.driver.UsbSerialDriver
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
@@ -26,11 +25,6 @@ class MeshServiceManager(private val context: Context) {
 
     companion object {
         private const val TAG = "MeshServiceManager"
-        private const val MTU_SIZE = 512
-        // Notifications drive real-time updates; the poll is only a safety net
-        // for missed FromNum notifications. Aggressive polling can starve the
-        // firmware's BLE stack and trigger watchdog reboots on some boards.
-        private const val POLL_INTERVAL_MS = 30_000L
     }
 
     data class IncomingText(val from: String, val to: String, val text: String, val channel: Int = 0, val timestamp: Long = System.currentTimeMillis())
@@ -328,8 +322,6 @@ class MeshServiceManager(private val context: Context) {
     private val _configComplete = MutableSharedFlow<Int>(extraBufferCapacity = 8)
     val configComplete: SharedFlow<Int> = _configComplete.asSharedFlow()
 
-    private var pendingConfigId: Int = 0
-
     private val nodeMap = mutableMapOf<Int, MeshNode>()
 
     val isConnected: Boolean
@@ -402,69 +394,6 @@ class MeshServiceManager(private val context: Context) {
             .onFailure { Log.e(TAG, "refreshConfig failed", it) }
     }
 
-    private fun handleFromRadio(fromRadio: MeshProtos.FromRadio) {
-        when {
-            fromRadio.hasMyInfo() -> {
-                val info = fromRadio.myInfo
-                myNodeNum = info.myNodeNum
-                _myNodeId.value = MeshtasticBle.nodeNumToId(myNodeNum)
-                Log.i(TAG, "My node: ${_myNodeId.value} (reboot_count=${info.rebootCount})")
-            }
-
-            fromRadio.hasMetadata() -> {
-                // Modern firmware (≥2.3) reports firmware version here, not in MyNodeInfo.
-                val md = fromRadio.metadata
-                if (md.firmwareVersion.isNotEmpty()) {
-                    _firmwareVersion.value = md.firmwareVersion
-                }
-                Log.i(TAG, "Device metadata: fw=${md.firmwareVersion} hw=${md.hwModel} role=${md.role}")
-            }
-
-            fromRadio.hasNodeInfo() -> {
-                val ni = fromRadio.nodeInfo
-                val node = MeshNode(
-                    nodeId = MeshtasticBle.nodeNumToId(ni.num),
-                    longName = if (ni.hasUser()) ni.user.longName else "Unknown",
-                    shortName = if (ni.hasUser()) ni.user.shortName else "??",
-                    lastHeard = ni.lastHeard.toLong(),
-                    batteryLevel = if (ni.hasDeviceMetrics()) ni.deviceMetrics.batteryLevel.toInt() else null,
-                    snr = if (ni.snr != 0f) ni.snr else null
-                )
-                nodeMap[ni.num] = node
-                _nodes.value = nodeMap.values.toList()
-
-                // If this is our own node, capture the User as owner
-                if (ni.num == myNodeNum && ni.hasUser()) {
-                    _owner.value = ni.user
-                }
-                // Track our own Position so the Fixed-Position editor can
-                // pre-fill lat/lon/altitude with the firmware's current value.
-                if (ni.num == myNodeNum && ni.hasPosition()) {
-                    _myPosition.value = ni.position
-                }
-            }
-
-            fromRadio.hasPacket() -> handleMeshPacket(fromRadio.packet)
-
-            fromRadio.hasConfig() -> handleConfig(fromRadio.config)
-
-            fromRadio.hasModuleConfig() -> handleModuleConfig(fromRadio.moduleConfig)
-
-            fromRadio.hasChannel() -> {
-                val ch = fromRadio.channel
-                val current = _channels.value.toMutableList()
-                val idx = current.indexOfFirst { it.index == ch.index }
-                if (idx >= 0) current[idx] = ch else current.add(ch)
-                _channels.value = current
-            }
-
-            fromRadio.configCompleteId != 0 -> {
-                Log.i(TAG, "Config complete (id=${fromRadio.configCompleteId})")
-                _configComplete.tryEmit(fromRadio.configCompleteId)
-            }
-        }
-    }
-
     private fun handleConfig(config: MeshProtos.Config) {
         when {
             config.hasLora() -> {
@@ -498,100 +427,6 @@ class MeshServiceManager(private val context: Context) {
         }
     }
 
-    private fun handleModuleConfig(moduleConfig: MeshProtos.ModuleConfig) {
-        val key = when {
-            moduleConfig.hasMqtt() -> "mqtt"
-            moduleConfig.hasSerial() -> "serial"
-            moduleConfig.hasExternalNotification() -> "external_notification"
-            moduleConfig.hasStoreForward() -> "store_forward"
-            moduleConfig.hasRangeTest() -> "range_test"
-            moduleConfig.hasTelemetry() -> "telemetry"
-            moduleConfig.hasCannedMessage() -> "canned_message"
-            moduleConfig.hasAudio() -> "audio"
-            moduleConfig.hasRemoteHardware() -> "remote_hardware"
-            moduleConfig.hasNeighborInfo() -> "neighbor_info"
-            moduleConfig.hasAmbientLighting() -> "ambient_lighting"
-            moduleConfig.hasDetectionSensor() -> "detection_sensor"
-            moduleConfig.hasPaxcounter() -> "paxcounter"
-            else -> return
-        }
-        val current = _moduleConfigs.value.toMutableMap()
-        current[key] = moduleConfig
-        _moduleConfigs.value = current
-        Log.i(TAG, "Module config received: $key")
-    }
-
-    private fun handleMeshPacket(packet: MeshProtos.MeshPacket) {
-        if (!packet.hasDecoded()) return
-
-        val data = packet.decoded
-        val fromNum = packet.from
-        val toNum = packet.getTo()
-        val fromId = MeshtasticBle.nodeNumToId(fromNum)
-        // Strict broadcast detection: ONLY 0xFFFFFFFF is broadcast.
-        // (Now that `to` is fixed32 in mesh.proto, it parses correctly and
-        // `0` is no longer a spurious default for DM packets.)
-        val toId = if (toNum == MeshtasticBle.BROADCAST_ADDR) "broadcast"
-                   else MeshtasticBle.nodeNumToId(toNum)
-        val channel = packet.channel
-        Log.d(TAG, "RX packet from=$fromNum ($fromId) to=$toNum ($toId) ch=$channel port=${data.portnum}")
-
-        when (data.portnum) {
-            PortNum.TEXT_MESSAGE_APP -> {
-                val text = data.payload.toStringUtf8()
-                _incomingTextMessages.tryEmit(IncomingText(from = fromId, to = toId, text = text, channel = channel))
-                Log.i(TAG, "Text from $fromId to $toId (ch=$channel): $text")
-            }
-
-            PortNum.NODEINFO_APP -> {
-                try {
-                    val user = MeshProtos.User.parseFrom(data.payload)
-                    val existing = nodeMap[fromNum]
-                    nodeMap[fromNum] = (existing ?: MeshNode(nodeId = MeshtasticBle.nodeNumToId(fromNum))).copy(
-                        longName = user.longName,
-                        shortName = user.shortName
-                    )
-                    _nodes.value = nodeMap.values.toList()
-                    if (fromNum == myNodeNum) {
-                        _owner.value = user
-                    }
-                } catch (_: Exception) {}
-            }
-
-            PortNum.ADMIN_APP -> {
-                // Handle admin responses (e.g. after a get_config_request)
-                try {
-                    val admin = MeshProtos.AdminMessage.parseFrom(data.payload)
-                    handleAdminResponse(admin)
-                } catch (e: Exception) {
-                    Log.e(TAG, "Failed to parse AdminMessage", e)
-                }
-            }
-
-            else -> {
-                _incomingDataMessages.tryEmit(
-                    IncomingData(from = fromId, to = toId, portNum = data.portnumValue, payload = data.payload.toByteArray(), channel = channel)
-                )
-            }
-        }
-    }
-
-    private fun handleAdminResponse(admin: MeshProtos.AdminMessage) {
-        when {
-            admin.hasGetConfigResponse() -> handleConfig(admin.getConfigResponse)
-            admin.hasGetModuleConfigResponse() -> handleModuleConfig(admin.getModuleConfigResponse)
-            admin.hasGetChannelResponse() -> {
-                val ch = admin.getChannelResponse
-                val current = _channels.value.toMutableList()
-                val idx = current.indexOfFirst { it.index == ch.index }
-                if (idx >= 0) current[idx] = ch else current.add(ch)
-                _channels.value = current
-            }
-            admin.hasGetOwnerResponse() -> {
-                _owner.value = admin.getOwnerResponse
-            }
-        }
-    }
 
     // ==========  SENDING  ==========
 
