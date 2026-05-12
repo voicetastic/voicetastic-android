@@ -269,6 +269,8 @@ class MessagingViewModel(
         val toStr = if (broadcast) "broadcast" else NodeIds.nodeNumToId(toNode.toInt())
         val bitrateIdx = when (val c = codec) {
             VoiceCodec.AmrNb -> codecParam.toInt()
+            // Codec2: codecParam encodes the mode (0..7). Surface as-is.
+            VoiceCodec.Codec2 -> codecParam.toInt()
             VoiceCodec.Opus, VoiceCodec.PcmS16Le -> 0
             is VoiceCodec.Unknown -> c.raw.toInt()
         }
