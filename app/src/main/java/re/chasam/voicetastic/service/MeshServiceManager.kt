@@ -81,120 +81,13 @@ class MeshServiceManager(private val context: Context) {
     private val _activeTransport = MutableStateFlow(TransportType.NONE)
     val activeTransport: StateFlow<TransportType> = _activeTransport.asStateFlow()
 
-    init {
-
-        scope.launch {
-            rustService.setStateListener(object : MeshStateListener {
-                override fun onState(state: MeshConnectionState) {
-                _connectionState.value = when (state) {
-                    MeshConnectionState.CONNECTED, MeshConnectionState.READY -> "CONNECTED"
-                    MeshConnectionState.CONNECTING, MeshConnectionState.CONFIGURING -> "CONNECTING"
-                    MeshConnectionState.DISCONNECTED -> "DISCONNECTED"
-                }
-                if (state == MeshConnectionState.DISCONNECTED) {
-                    clearSessionState()
-                    _activeTransport.value = TransportType.NONE
-                    usbActive = false
-                }
-            }
-            })
-
-            rustService.setTextListener(object : MeshTextListener {
-                override fun onText(message: uniffi.voicetastic.IncomingTextMsg) {
-                    val toId = if (message.to.toInt() == MeshtasticBle.BROADCAST_ADDR) "broadcast"
-                    else MeshtasticBle.nodeNumToId(message.to.toInt())
-                    _incomingTextMessages.tryEmit(
-                        IncomingText(
-                            from = message.fromId,
-                            to = toId,
-                            text = message.text,
-                            channel = message.channel.toInt(),
-                            timestamp = message.rxTime.toLong() * 1000L,
-                        )
-                    )
-                }
-            })
-
-            rustService.setDataListener(object : MeshDataListener {
-                override fun onData(message: uniffi.voicetastic.IncomingDataMsg) {
-                    val fromId = MeshtasticBle.nodeNumToId(message.from.toInt())
-                    val toId = if (message.to.toInt() == MeshtasticBle.BROADCAST_ADDR) "broadcast"
-                    else MeshtasticBle.nodeNumToId(message.to.toInt())
-                    _incomingDataMessages.tryEmit(
-                        IncomingData(
-                            from = fromId,
-                            to = toId,
-                            portNum = message.portnum,
-                            payload = message.payload,
-                            channel = message.channel.toInt(),
-                            timestamp = message.rxTime.toLong() * 1000L,
-                        )
-                    )
-                }
-            })
-
-            rustService.setConfigListener(object : MeshConfigListener {
-                override fun onMyInfo(encoded: ByteArray) {
-                    runCatching { MeshProtos.MyNodeInfo.parseFrom(encoded) }
-                        .onSuccess { info ->
-                            myNodeNum = info.myNodeNum
-                            _myNodeId.value = MeshtasticBle.nodeNumToId(myNodeNum)
-                        }
-                }
-
-            override fun onNodeInfo(encoded: ByteArray) {
-                runCatching { MeshProtos.NodeInfo.parseFrom(encoded) }
-                    .onSuccess { ni ->
-                        val node = MeshNode(
-                            nodeId = MeshtasticBle.nodeNumToId(ni.num),
-                            longName = if (ni.hasUser()) ni.user.longName else "Unknown",
-                            shortName = if (ni.hasUser()) ni.user.shortName else "??",
-                            lastHeard = ni.lastHeard.toLong(),
-                            batteryLevel = if (ni.hasDeviceMetrics()) ni.deviceMetrics.batteryLevel.toInt() else null,
-                            snr = if (ni.snr != 0f) ni.snr else null,
-                        )
-                        nodeMap[ni.num] = node
-                        _nodes.value = nodeMap.values.toList()
-                        if (ni.num == myNodeNum && ni.hasUser()) _owner.value = ni.user
-                        if (ni.num == myNodeNum && ni.hasPosition()) _myPosition.value = ni.position
-                    }
-            }
-
-            override fun onConfig(encoded: ByteArray) {
-                runCatching { MeshProtos.Config.parseFrom(encoded) }
-                    .onSuccess { handleConfig(it) }
-            }
-
-            override fun onChannel(encoded: ByteArray) {
-                runCatching { MeshProtos.Channel.parseFrom(encoded) }
-                    .onSuccess { ch ->
-                        val current = _channels.value.toMutableList()
-                        val idx = current.indexOfFirst { it.index == ch.index }
-                        if (idx >= 0) current[idx] = ch else current.add(ch)
-                        _channels.value = current
-                    }
-            }
-
-            override fun onOwner(encoded: ByteArray) {
-                runCatching { MeshProtos.User.parseFrom(encoded) }
-                    .onSuccess { _owner.value = it }
-            }
-
-            override fun onMetadata(encoded: ByteArray) {
-                runCatching { MeshProtos.DeviceMetadata.parseFrom(encoded) }
-                    .onSuccess { md ->
-                        if (md.firmwareVersion.isNotEmpty()) {
-                            _firmwareVersion.value = md.firmwareVersion
-                        }
-                    }
-            }
-
-                override fun onConfigComplete(nonce: UInt) {
-                    _configComplete.tryEmit(nonce.toInt())
-                }
-            })
-        }
-    }
+    // NOTE: the listener-registration `init { ... }` block lives further down
+    // in the file, AFTER every StateFlow / nodeMap field is declared. The
+    // Rust side fires `on_state(Disconnected)` synchronously during
+    // `setStateListener`, which then re-enters our Kotlin code and calls
+    // `clearSessionState()` — that touches `nodeMap`, `_radioConfig`, ...,
+    // so they MUST already be initialised. Kotlin runs initialisers in
+    // declaration order, hence the deliberate placement.
 
     /** Enumerate USB serial drivers that look like Meshtastic devices. */
     fun discoverUsbDevices(): List<UsbSerialDriver> = usbTransport.discoverDevices()
@@ -327,26 +220,238 @@ class MeshServiceManager(private val context: Context) {
     val isConnected: Boolean
         get() = _connectionState.value == "CONNECTED" || _connectionState.value == "CONNECTING"
 
+    init {
+        // Register Rust-side listeners synchronously.
+        //
+        // This MUST happen after every StateFlow / SharedFlow / nodeMap field
+        // above is declared: `setStateListener` immediately fires
+        // `on_state(current_state)` with `Disconnected`, which re-enters
+        // Kotlin and ends up calling `clearSessionState()` — that touches
+        // `nodeMap`, `_radioConfig`, `_channels`, `_moduleConfigs`, ... so
+        // any of those still being null produces an NPE inside a UniFFI
+        // callback (surfaced as
+        // `InternalException: Callback interface failure ...
+        //  NullPointerException: ... on a null object reference`).
+        //
+        // The previous design used `scope.launch { ... }` to dodge this
+        // ordering issue at the cost of racing user-initiated connects;
+        // doing it synchronously here — but AFTER all fields are
+        // initialised — is correct on both counts.
+        rustService.setStateListener(object : MeshStateListener {
+            override fun onState(state: MeshConnectionState) {
+                val mapped = when (state) {
+                    MeshConnectionState.CONNECTED, MeshConnectionState.READY -> "CONNECTED"
+                    MeshConnectionState.CONNECTING, MeshConnectionState.CONFIGURING -> "CONNECTING"
+                    MeshConnectionState.DISCONNECTED -> "DISCONNECTED"
+                }
+                Log.d(TAG, "Rust state → $state (mapped=$mapped)")
+                _connectionState.value = mapped
+                if (state == MeshConnectionState.DISCONNECTED) {
+                    clearSessionState()
+                    _activeTransport.value = TransportType.NONE
+                    usbActive = false
+                }
+            }
+        })
 
-    // ==========  BLE SCANNING (UI placeholders)  ==========
+        rustService.setTextListener(object : MeshTextListener {
+            override fun onText(message: uniffi.voicetastic.IncomingTextMsg) {
+                val toId = if (message.to.toInt() == MeshtasticBle.BROADCAST_ADDR) "broadcast"
+                else MeshtasticBle.nodeNumToId(message.to.toInt())
+                _incomingTextMessages.tryEmit(
+                    IncomingText(
+                        from = message.fromId,
+                        to = toId,
+                        text = message.text,
+                        channel = message.channel.toInt(),
+                        timestamp = message.rxTime.toLong() * 1000L,
+                    )
+                )
+            }
+        })
+
+        rustService.setDataListener(object : MeshDataListener {
+            override fun onData(message: uniffi.voicetastic.IncomingDataMsg) {
+                val fromId = MeshtasticBle.nodeNumToId(message.from.toInt())
+                val toId = if (message.to.toInt() == MeshtasticBle.BROADCAST_ADDR) "broadcast"
+                else MeshtasticBle.nodeNumToId(message.to.toInt())
+                _incomingDataMessages.tryEmit(
+                    IncomingData(
+                        from = fromId,
+                        to = toId,
+                        portNum = message.portnum,
+                        payload = message.payload,
+                        channel = message.channel.toInt(),
+                        timestamp = message.rxTime.toLong() * 1000L,
+                    )
+                )
+            }
+        })
+
+        rustService.setConfigListener(object : MeshConfigListener {
+            override fun onMyInfo(encoded: ByteArray) {
+                runCatching { MeshProtos.MyNodeInfo.parseFrom(encoded) }
+                    .onSuccess { info ->
+                        myNodeNum = info.myNodeNum
+                        _myNodeId.value = MeshtasticBle.nodeNumToId(myNodeNum)
+                    }
+            }
+
+            override fun onNodeInfo(encoded: ByteArray) {
+                runCatching { MeshProtos.NodeInfo.parseFrom(encoded) }
+                    .onSuccess { ni ->
+                        val node = MeshNode(
+                            nodeId = MeshtasticBle.nodeNumToId(ni.num),
+                            longName = if (ni.hasUser()) ni.user.longName else "Unknown",
+                            shortName = if (ni.hasUser()) ni.user.shortName else "??",
+                            lastHeard = ni.lastHeard.toLong(),
+                            batteryLevel = if (ni.hasDeviceMetrics()) ni.deviceMetrics.batteryLevel.toInt() else null,
+                            snr = if (ni.snr != 0f) ni.snr else null,
+                        )
+                        nodeMap[ni.num] = node
+                        _nodes.value = nodeMap.values.toList()
+                        if (ni.num == myNodeNum && ni.hasUser()) _owner.value = ni.user
+                        if (ni.num == myNodeNum && ni.hasPosition()) _myPosition.value = ni.position
+                    }
+            }
+
+            override fun onConfig(encoded: ByteArray) {
+                runCatching { MeshProtos.Config.parseFrom(encoded) }
+                    .onSuccess { handleConfig(it) }
+            }
+
+            override fun onChannel(encoded: ByteArray) {
+                runCatching { MeshProtos.Channel.parseFrom(encoded) }
+                    .onSuccess { ch ->
+                        val current = _channels.value.toMutableList()
+                        val idx = current.indexOfFirst { it.index == ch.index }
+                        if (idx >= 0) current[idx] = ch else current.add(ch)
+                        _channels.value = current
+                    }
+            }
+
+            override fun onOwner(encoded: ByteArray) {
+                runCatching { MeshProtos.User.parseFrom(encoded) }
+                    .onSuccess { _owner.value = it }
+            }
+
+            override fun onMetadata(encoded: ByteArray) {
+                runCatching { MeshProtos.DeviceMetadata.parseFrom(encoded) }
+                    .onSuccess { md ->
+                        if (md.firmwareVersion.isNotEmpty()) {
+                            _firmwareVersion.value = md.firmwareVersion
+                        }
+                    }
+            }
+
+            override fun onConfigComplete(nonce: UInt) {
+                _configComplete.tryEmit(nonce.toInt())
+            }
+        })
+    }
+
+
+    // ==========  BLE SCANNING  ==========
+    //
+    // The Rust bridge does not expose device discovery on Android (the
+    // `ble-btleplug` feature is desktop-only). We keep the BLE scan
+    // implemented natively here using `BluetoothLeScanner`; only the
+    // connect/I-O path is delegated to Rust via `RustMeshSession`.
+
+    private val scanCallback = object : android.bluetooth.le.ScanCallback() {
+        @SuppressLint("MissingPermission")
+        override fun onScanResult(
+            callbackType: Int,
+            result: android.bluetooth.le.ScanResult,
+        ) {
+            val device = result.device ?: return
+            val current = _discoveredDevices.value
+            if (current.none { it.address == device.address }) {
+                _discoveredDevices.value = current + device
+                Log.i(TAG, "Found Meshtastic device: ${device.name ?: device.address}")
+            }
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            Log.e(TAG, "BLE scan failed: $errorCode")
+            _isScanning.value = false
+        }
+    }
+
+    /** Resolve the system Bluetooth adapter via BluetoothManager (API 18+). */
+    private fun bluetoothAdapter(): android.bluetooth.BluetoothAdapter? {
+        val manager = context.getSystemService(Context.BLUETOOTH_SERVICE)
+            as? android.bluetooth.BluetoothManager
+        return manager?.adapter
+    }
 
     @SuppressLint("MissingPermission")
     fun startScan() {
-        // Scanning is handled by the Rust bridge; this is a UI placeholder
-        // that may be revived if Rust-side scanning is exposed.
-        Log.d(TAG, "startScan called (Rust bridge handles discovery)")
+        val adapter = bluetoothAdapter()
+        if (adapter == null) {
+            Log.w(TAG, "startScan: no Bluetooth adapter")
+            return
+        }
+        if (!adapter.isEnabled) {
+            Log.w(TAG, "startScan: Bluetooth disabled")
+            return
+        }
+        val scanner = adapter.bluetoothLeScanner
+        if (scanner == null) {
+            Log.w(TAG, "startScan: bluetoothLeScanner unavailable")
+            return
+        }
+        if (_isScanning.value) {
+            Log.d(TAG, "startScan: already scanning")
+            return
+        }
+        _discoveredDevices.value = emptyList()
+        _isScanning.value = true
+
+        val filter = android.bluetooth.le.ScanFilter.Builder()
+            .setServiceUuid(android.os.ParcelUuid(MeshtasticBle.SERVICE_UUID))
+            .build()
+        val settings = android.bluetooth.le.ScanSettings.Builder()
+            .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
+
+        try {
+            scanner.startScan(listOf(filter), settings, scanCallback)
+            Log.i(TAG, "BLE scan started")
+        } catch (e: Exception) {
+            Log.e(TAG, "BLE scan failed to start", e)
+            _isScanning.value = false
+            return
+        }
+
+        // Stop automatically after 15s — Android caps background scans
+        // anyway and an indefinite scan drains the battery.
+        scope.launch {
+            delay(15_000)
+            stopScan()
+        }
     }
 
     @SuppressLint("MissingPermission")
     fun stopScan() {
-        // Scanning is handled by the Rust bridge; this is a UI placeholder.
-        Log.d(TAG, "stopScan called")
+        if (!_isScanning.value) return
+        try {
+            bluetoothAdapter()?.bluetoothLeScanner?.stopScan(scanCallback)
+        } catch (e: Exception) {
+            Log.w(TAG, "stopScan threw", e)
+        }
+        _isScanning.value = false
+        Log.i(TAG, "BLE scan stopped")
     }
 
     // ==========  BLE CONNECTION  ==========
 
     @SuppressLint("MissingPermission")
     fun connect(device: BluetoothDevice) {
+        // Stop scanning before opening GATT — Android serialises scan +
+        // connect on the same radio and an active scan can wedge the
+        // GATT setup.
+        stopScan()
         _connectionState.value = "CONNECTING"
         _activeTransport.value = TransportType.BLE
         scope.launch {
@@ -431,19 +536,27 @@ class MeshServiceManager(private val context: Context) {
     // ==========  SENDING  ==========
 
     fun sendText(text: String, destination: String? = null, channel: Int = 0): Boolean {
-        if (!isConnected) return false
+        if (!isConnected) {
+            Log.w(TAG, "sendText dropped: not connected (state=${_connectionState.value}, transport=${_activeTransport.value})")
+            return false
+        }
 
-        val destNum = if (destination != null) {
-            MeshtasticBle.nodeIdToNum(destination) ?: run {
+        // Rust's `send_text` takes `Option<u32>` for dest. Mapping the
+        // Meshtastic BROADCAST_ADDR (0xFFFFFFFF) to `null` makes the Rust
+        // side correctly omit `want_ack` (firmware silently drops acks for
+        // broadcast packets, so requesting one would just stall the queue).
+        val destUInt: UInt? = if (destination != null) {
+            MeshtasticBle.nodeIdToNum(destination)?.toUInt() ?: run {
                 Log.e(TAG, "Invalid destination node ID: $destination")
                 return false
             }
         } else {
-            MeshtasticBle.BROADCAST_ADDR
+            null
         }
 
         return try {
-            rustService.sendText(text, channel.toUInt(), destNum.toUInt())
+            val id = rustService.sendText(text, channel.toUInt(), destUInt)
+            Log.d(TAG, "sendText ok (id=$id, dest=${destination ?: "broadcast"}, ch=$channel)")
             true
         } catch (e: Exception) {
             Log.e(TAG, "sendText failed", e)
@@ -452,19 +565,23 @@ class MeshServiceManager(private val context: Context) {
     }
 
     fun sendData(data: ByteArray, portNum: Int, destination: String? = null, channel: Int = 0): Boolean {
-        if (!isConnected) return false
+        if (!isConnected) {
+            Log.w(TAG, "sendData dropped: not connected (state=${_connectionState.value}, transport=${_activeTransport.value})")
+            return false
+        }
 
-        val destNum = if (destination != null) {
-            MeshtasticBle.nodeIdToNum(destination) ?: run {
+        val destUInt: UInt? = if (destination != null) {
+            MeshtasticBle.nodeIdToNum(destination)?.toUInt() ?: run {
                 Log.e(TAG, "Invalid destination node ID: $destination")
                 return false
             }
         } else {
-            MeshtasticBle.BROADCAST_ADDR
+            null
         }
 
         return try {
-            rustService.sendData(portNum, data, channel.toUInt(), destNum.toUInt(), true)
+            val id = rustService.sendData(portNum, data, channel.toUInt(), destUInt, true)
+            Log.d(TAG, "sendData ok (id=$id, port=$portNum, dest=${destination ?: "broadcast"}, ch=$channel, len=${data.size})")
             true
         } catch (e: Exception) {
             Log.e(TAG, "sendData failed", e)
