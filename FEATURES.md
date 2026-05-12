@@ -5,10 +5,10 @@ mesh-radio ecosystem. In addition to the standard text-messaging surface it
 adds **voice messaging** carried over the same LoRa mesh, and exposes the
 full set of Meshtastic device-configuration knobs from a single Compose UI.
 
-> **Companion document:** the wire format used by voice messages is specified
-> in [`VOICE_PROTOCOL.md`](./VOICE_PROTOCOL.md). This file describes
-> everything *around* that — the app's features, the BLE link, the Meshtastic
-> protobuf protocol surface we use, and how the pieces fit together.
+> **Companion documents:**
+> - [`VOICE_PROTOCOL.md`](./VOICE_PROTOCOL.md) — wire format for voice messages.
+> - [`INTEGRATION.md`](./INTEGRATION.md) — how the Rust `voicetastic-core`
+>   crate is linked via UniFFI into the Android build.
 
 ---
 
@@ -16,7 +16,7 @@ full set of Meshtastic device-configuration knobs from a single Compose UI.
 
 1. [Top-level features](#top-level-features)
 2. [Architecture](#architecture)
-3. [Transport protocol — Meshtastic BLE GATT](#transport-protocol--meshtastic-ble-gatt)
+3. [Transport layer](#transport-layer)
 4. [Application protocol — Meshtastic protobuf](#application-protocol--meshtastic-protobuf)
 5. [Voice protocol](#voice-protocol)
 6. [Configuration & admin protocol](#configuration--admin-protocol)
@@ -29,19 +29,26 @@ full set of Meshtastic device-configuration knobs from a single Compose UI.
 
 | Feature | Notes |
 |---|---|
-| **BLE device discovery & connection** | Scans for any peripheral advertising the Meshtastic GATT service UUID and presents them in a unified list. |
+| **BLE device discovery & connection** | Connects to any Meshtastic peripheral via BLE GATT; transport adapter handles characteristic I/O. |
+| **USB serial connection** | USB-OTG via CDC / CP210x / CH34x / FTDI at 115 200 baud, with 0x94 stream-framing. |
 | **Persistent mesh status** | Live connection state, my node ID, firmware version, and the count + roster of nodes the radio currently knows about. |
 | **Text messaging** | Send/receive on `TEXT_MESSAGE_APP` (port 1). Broadcast or directed to a specific node ID, on the user-selected channel. |
-| **Voice messaging** | *⚠️ Experimental — not yet validated on real LoRa hardware.* Records AMR-NB audio, splits it into ≤ 231-byte chunks, ships them on `PRIVATE_APP` (port 256), reassembles + plays on the receive side. See [`VOICE_PROTOCOL.md`](./VOICE_PROTOCOL.md). |
+| **Voice messaging (v2)** | Records AMR-NB audio → Rust `voicetastic_core::voice::build_message` chunks with 12-byte v2 header, optional Reed-Solomon FEC + AES-GCM crypto → shipped on `PRIVATE_APP` (port 256) → Rust `VoiceAssembler` reassembles + NACK support. See [`VOICE_PROTOCOL.md`](./VOICE_PROTOCOL.md). |
 | **Mesh node browser** | Live list of nodes (long name, short name, node ID, last-heard, battery, SNR). |
 | **Full radio configuration UI** | LoRa, Device, Position, Power, Network, Display, Bluetooth, Channels, Owner. Every section is read-on-connect, dirty-tracked, and writable through admin messages. |
 | **Voice-message tuning** | Bitrate (8 AMR-NB modes), max recording duration, assembly timeout, and "play partial on timeout" toggle. |
 | **Device actions** | Refresh full config, reboot (with delay), factory reset. |
-| **Out-of-order / partial voice play** | Voice chunks may arrive out of order or be lost; the receiver fills missing slots with AMR-NB NO_DATA frames so the audio timeline stays aligned. |
+| **Out-of-order / partial voice play** | Voice chunks may arrive out of order or be lost; the Rust assembler fills missing slots so the audio timeline stays aligned. |
 
 ---
 
 ## Architecture
+
+The runtime is split between Kotlin (UI, platform I/O) and an embedded
+Rust library (`voicetastic-core`) linked via
+[UniFFI](https://github.com/mozilla/uniffi-rs). Rust owns the Meshtastic
+state machine, protobuf codec, and voice protocol; Kotlin supplies the
+platform transports (BLE GATT, USB serial) and the Compose UI.
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -64,21 +71,29 @@ full set of Meshtastic device-configuration knobs from a single Compose UI.
        ┌───────────────────────────────────────────────────────┐
        │                MeshServiceManager                     │
        │                                                       │
-       │  • BLE scan / connect / GATT plumbing                 │
-       │  • Service+characteristic discovery, MTU, CCCD        │
-       │  • ToRadio writes (semaphore-serialised)              │
-       │  • FromRadio polling + FromNum notify                 │
-       │  • want_config_id boot-strap                          │
+       │  • Registers Rust-side listeners (state, text, data,  │
+       │    config) and publishes StateFlows to the UI layer    │
+       │  • Routes send calls through Rust MeshService          │
+       │  • Admin writes (writeConfig / writeChannel /          │
+       │    writeOwner / reboot / factory_reset)               │
        │  • Per-section StateFlow caches (LoRa, Device, …)     │
-       │  • Admin writes (setConfig / setChannel / setOwner /  │
-       │    reboot / factory_reset)                            │
-       │  • Inbound packet routing → text / data / nodeInfo /  │
-       │    config / channel / configCompleteId                │
-       └────────────────────┬──────────────────────────────────┘
-                            │
-                ┌───────────▼────────────┐
-                │  Android BLE GATT API  │
-                └────────────────────────┘
+       └──────────┬───────────────────────┬────────────────────┘
+                  │                       │
+       ┌──────────▼───────────┐  ┌────────▼──────────┐
+       │  Rust MeshService    │  │  RustMeshSession   │
+       │  (UniFFI bindings)   │  │  (lifecycle owner) │
+       │                      │  └────────┬───────────┘
+       │  • WantConfigId      │           │
+       │  • state machine     │  ┌────────▼───────────────────┐
+       │  • packet routing    │  │ BleMeshTransport (GATT)    │
+       │  • voice build/asm   │  │ UsbMeshTransportV2 (serial)│
+       └──────────────────────┘  │ ← implements UniFFI        │
+                                 │   MeshTransport trait      │
+                                 └────────┬───────────────────┘
+                                          │
+                              ┌───────────▼────────────┐
+                              │  Android BLE / USB API │
+                              └────────────────────────┘
 ```
 
 ### Key observable state (StateFlow / SharedFlow)
@@ -86,104 +101,64 @@ full set of Meshtastic device-configuration knobs from a single Compose UI.
 | Flow | Type | What it carries |
 |---|---|---|
 | `connectionState` | `StateFlow<String>` | `"DISCONNECTED" \| "CONNECTING" \| "CONNECTED"` |
-| `discoveredDevices` | `StateFlow<List<BluetoothDevice>>` | BLE scan results filtered by Meshtastic service UUID |
+| `activeTransport` | `StateFlow<TransportType>` | `NONE \| BLE \| USB` |
 | `myNodeId` | `StateFlow<String?>` | Local node, formatted as `!aabbccdd` |
 | `firmwareVersion` | `StateFlow<String?>` | From `DeviceMetadata.firmware_version` |
 | `nodes` | `StateFlow<List<MeshNode>>` | Roster known to the connected node |
-| `radioConfig` / `deviceConfig` / `positionConfig` / `powerConfig` / `networkConfig` / `displayConfig` / `bluetoothConfig` | `StateFlow<…?>` | Per-section LoRa/etc. config protos |
+| `radioConfig` / `deviceConfig` / … | `StateFlow<…?>` | Per-section LoRa/etc. config protos |
 | `channels` | `StateFlow<List<Channel>>` | The 8 Meshtastic channels |
 | `owner` | `StateFlow<User?>` | Local node's user record |
-| `moduleConfigs` | `StateFlow<Map<String, ModuleConfig>>` | Modules section (MQTT, Serial, External Notification, etc.) |
 | `incomingTextMessages` | `SharedFlow<IncomingText>` | Decrypted text frames from the mesh |
 | `incomingDataMessages` | `SharedFlow<IncomingData>` | Non-text data frames (used for voice) |
 | `configComplete` | `SharedFlow<Int>` | Fires when the firmware finishes a `want_config_id` burst |
 
 ---
 
-## Transport protocol — Meshtastic BLE GATT
+## Transport layer
 
-Voicetastic talks to the radio over the standard Meshtastic BLE GATT
-profile. The relevant UUIDs live in
-[`MeshtasticBle.kt`](./app/src/main/java/re/chasam/voicetastic/service/MeshtasticBle.kt):
+Two transport adapters implement the UniFFI `MeshTransport` foreign trait
+so the Rust `MeshService` can drive any Meshtastic radio:
 
-| Role | UUID |
-|---|---|
-| Service | `6ba1b218-15a8-461f-9fa8-5dcae273eafd` |
-| `TORADIO` characteristic (Write) | `f75c76d2-129e-4dad-a1dd-7866124401e7` |
-| `FROMRADIO` characteristic (Read) | `2c55e69e-4993-11ed-b878-0242ac120002` |
-| `FROMNUM` characteristic (Notify) | `ed9da18c-a800-4f66-a670-aa7547de15e6` |
-| CCCD | `00002902-0000-1000-8000-00805f9b34fb` |
+### BLE (`BleMeshTransport`)
 
-### Connection flow
+Opens a GATT connection, discovers the Meshtastic service, negotiates
+MTU, enables `FROMNUM` notifications, then:
 
-```
-scan (filter by SERVICE_UUID)
-        │
-        ▼
-connectGatt()  ──▶  GATT_CONNECTED
-        │
-        ▼
-refresh GATT cache (reflection)        ── stale-cache workaround
-        │
-        ▼
-requestMtu(MTU_SIZE)                    ── larger MTU = fewer round-trips
-        │
-        ▼
-discoverServices()                      ── retried up to 3× on transient failures
-        │
-        ▼
-locate TORADIO + FROMRADIO + FROMNUM
-        │
-        ▼
-enable notifications on FROMNUM (write CCCD = 0x0001)
-        │
-        ▼
-onSetupComplete()
-        │
-        ▼
-state = "CONNECTED"
-        │
-        ▼
-delay 300 ms → requestConfig()          ── starts the boot-strap
-```
+- **Outbound:** `writeToRadio()` → serialised BLE characteristic write.
+- **Inbound:** `FROMNUM` notify triggers drain reads of `FROMRADIO`;
+  payloads are pushed into a Rust-side `MeshTransportSink`.
+- **Safety net:** A 30 s polling loop re-reads `FROMRADIO` to catch
+  missed notifications.
 
-### Read/write semantics
+UUIDs are defined in `MeshtasticBle.kt`.
 
-* **`writeCharacteristic`** is serialised through a `Mutex` and gated by a
-  `Semaphore` so the next `ToRadio` is only sent after the previous BLE
-  write callback fires (or a 2 s timeout). This avoids the
-  `GATT_WRITE_REQUEST_BUSY` failure that BLE stacks return when callers
-  fire-and-forget.
-* **`readCharacteristic`** on `FROMRADIO` is the firmware's "give me one
-  queued `FromRadio`" primitive — the radio will return an empty payload
-  when the queue is drained.
-* **`FROMNUM` notification** is an opaque 4-byte counter; we treat any
-  notification as "there is at least one new `FromRadio` to drain" and
-  read until the queue is empty.
-* A **safety-net polling loop** (`POLL_INTERVAL_MS`) re-reads `FROMRADIO`
-  in case a notification was missed/coalesced.
+### USB Serial (`UsbMeshTransportV2`)
+
+Wraps the platform-level `UsbMeshTransport` (CDC/CP210x/CH34x/FTDI at
+115 200 8N1) and adapts it to the UniFFI trait. Inbound `FromRadio`
+frames — already deframed by `MeshSerialFraming` (0x94 SLIP variant) —
+are pumped into the Rust sink.
+
+### Session lifecycle (`RustMeshSession`)
+
+`RustMeshSession` is the lifecycle owner that ties a transport adapter
+to the Rust `MeshService`. On BLE it waits for the GATT setup callback;
+on USB it connects immediately. `close()` tears everything down:
+Rust disconnect → transport shutdown → sink shutdown.
 
 ### `want_config_id` bootstrap
 
-After the GATT setup completes, the manager sends:
+The Rust `MeshService` automatically sends:
 
 ```protobuf
 ToRadio { want_config_id = <non-zero u32> }
 ```
 
-The firmware replies with a **burst** of framed `FromRadio` messages —
-typically:
-
-1. `MyNodeInfo` (carries `my_node_num`)
-2. `DeviceMetadata` (firmware version, hardware model, role)
-3. `NodeInfo[]` (every node the radio knows)
-4. `Channel[]` (8 entries)
-5. `Config[]` (LoRa, Device, Position, Power, Network, Display, Bluetooth)
-6. `ModuleConfig[]` (MQTT, Serial, External Notification, …)
-7. `config_complete_id` (echoes the requested id; UI uses this to drop
-   "loading" spinners)
-
-The same flow is re-used by the **Refresh** button on the Settings screen.
+The firmware replies with a burst of `FromRadio` messages (MyNodeInfo,
+NodeInfo[], Channel[], Config[], ModuleConfig[], config_complete_id).
+Rust parses these internally and fires the registered Kotlin listeners
+(`MeshStateListener`, `MeshConfigListener`, etc.) which populate the
+`MeshServiceManager` StateFlows.
 
 ---
 
@@ -233,22 +208,23 @@ ToRadio.packet = MeshPacket {
 }
 ```
 
-### Inbound packet routing
+### Inbound event routing
 
-`MeshServiceManager.handleFromRadio()` is a `when {…}` that fans out by the
-`oneof` variant set on the incoming `FromRadio`:
+The Rust `MeshService` parses all inbound `FromRadio` frames internally
+and fires registered Kotlin listener callbacks:
 
-| `FromRadio` variant | Action |
-|---|---|
-| `my_info` | Cache `myNodeNum`, derive `myNodeId` |
-| `metadata` | Cache `firmwareVersion` |
-| `node_info` | Insert/update entry in `nodeMap`, emit `nodes`; if it's our own node, also stash `_owner` |
-| `packet` (text) | `_incomingTextMessages.tryEmit(IncomingText(...))` |
-| `packet` (data) | Either route to admin handler (`portnum == ADMIN_APP`) or `_incomingDataMessages.tryEmit(IncomingData(...))` |
-| `config` | Update the matching per-section StateFlow (`_radioConfig`, `_deviceConfig`, …) |
-| `module_config` | Update `_moduleConfigs[name]` |
-| `channel` | Replace/append in `_channels` |
-| `config_complete_id` | Emit on `_configComplete` |
+| Listener | Callback | `MeshServiceManager` action |
+|---|---|---|
+| `MeshStateListener` | `onState(state)` | Update `_connectionState` |
+| `MeshTextListener` | `onText(msg)` | Emit on `_incomingTextMessages` |
+| `MeshDataListener` | `onData(msg)` | Emit on `_incomingDataMessages` |
+| `MeshConfigListener` | `onMyInfo(bytes)` | Parse `MyNodeInfo`, cache `myNodeNum` |
+| | `onNodeInfo(bytes)` | Update `nodeMap` → `_nodes` |
+| | `onConfig(bytes)` | Route to per-section StateFlow |
+| | `onChannel(bytes)` | Replace/append in `_channels` |
+| | `onOwner(bytes)` | Update `_owner` |
+| | `onMetadata(bytes)` | Update `_firmwareVersion` |
+| | `onConfigComplete(nonce)` | Emit on `_configComplete` |
 
 ### Node IDs
 
@@ -261,18 +237,19 @@ broadcast destination is `0xFFFFFFFF` (`MeshtasticBle.BROADCAST_ADDR`).
 
 ## Voice protocol
 
-> ⚠️ **Status: experimental.** The voice path is implemented end-to-end
-> against the spec below, but has **not yet been validated over real LoRa
-> hardware** between two devices. Treat the numbers as design targets,
-> not production-tested guarantees.
+Voice messaging uses the **v2 protocol** implemented in the Rust
+`voicetastic-core` crate. The Android `MessagingViewModel` calls UniFFI
+bindings for both encoding (`buildMessage`) and decoding
+(`VoiceAssembler`).
 
-Voicetastic ships voice through the Meshtastic data plane on `PRIVATE_APP`
-(port 256). Each chunk has a 6-byte header (`version | messageId(BE16) |
-chunkIndex | totalChunks | bitrateIndex`) followed by raw AMR-NB frames.
+Features:
+- 12-byte header (version, message ID, stream sequence, chunk/parity
+  indices, codec, codec-param)
+- Optional Reed-Solomon FEC (parity chunks)
+- Optional AES-GCM encryption keyed from channel PSK
+- NACK-based retransmission for missing chunks
 
-The full specification — chunk format, capacity, assembly key, timeout
-behaviour, silence-frame substitution, duplicate protection — lives in a
-dedicated document:
+The full specification lives in:
 
 📄 **[`VOICE_PROTOCOL.md`](./VOICE_PROTOCOL.md)**
 
@@ -282,18 +259,18 @@ Key numbers at a glance:
 |---|---|
 | Codec | AMR-NB @ 8 kHz, 8 selectable bitrates (4.75 – 12.2 kbps) |
 | Default bitrate | MR795 (7.95 kbps) |
-| Max chunk size | 231 B (6 B header + 225 B payload) |
-| Max chunks per message | 255 |
-| Max audio per message | ~57 KB (≈ 57 s at MR795) |
-| Inter-chunk delay | 500 ms |
-| Reassembly timeout | 30 s (configurable) |
+| Max chunk size | 231 B (12 B header + 219 B payload) |
+| Max data chunks per message | 255 |
+| Reassembly timeout | configurable (default 30 s) |
 
 ---
 
 ## Configuration & admin protocol
 
 Settings UI sections are backed by Meshtastic's standard config protos and
-written through `AdminMessage` packets sent **to the local node**.
+written through `AdminMessage` packets sent **to the local node** via
+`MeshServiceManager.writeConfig()` / `writeChannel()` / `writeOwner()`,
+which delegate to the Rust bridge's `writeAdmin()`.
 
 ### Sections
 
@@ -311,44 +288,12 @@ written through `AdminMessage` packets sent **to the local node**.
 | Voice | `VoiceConfig` (in-app) | App preferences only — never sent to the radio |
 | Device Actions | n/a | `AdminMessage.reboot_seconds` / `AdminMessage.factory_reset` |
 
-### Admin write envelope
-
-```protobuf
-ToRadio.packet = MeshPacket {
-  to       = <my_node_num>            // ← admin packets always go to the local radio
-  decoded  = Data {
-    portnum      = ADMIN_APP          // 6
-    payload      = AdminMessage(...).serialize()
-    want_response = true
-  }
-  want_ack = true
-}
-```
-
-`MeshServiceManager.sendAdminMessage()` refuses to send if either we're
-not connected or `myNodeNum == 0` (we never received `MyNodeInfo`). Both
-gates log a precise reason so the failure mode is observable.
-
 ### Dirty tracking
 
 `ConfigViewModel` keeps a `Set<String>` of dirtied sections (`"lora"`,
 `"device"`, `"channels"`, …). The per-section flow collectors only
 overwrite UI state when the section is **clean**, so an inbound config
 refresh during editing will never blow away unsaved local edits.
-
-### Sample lifecycle: editing LoRa
-
-```
-User opens Settings  ──▶  per-section collectors hydrate UI from
-                          MeshServiceManager StateFlows
-User edits "region"  ──▶  dirty.add("lora")
-User taps "Apply"    ──▶  build LoRaConfig from UI state
-                          ──▶ writeConfig(Config(lora=…))
-                          ──▶ AdminMessage.set_config sent
-                          ──▶ dirty.remove("lora") on success
-Firmware persists,
-re-emits config       ──▶  UI re-hydrates (now clean)
-```
 
 ---
 
@@ -378,6 +323,10 @@ Runtime permissions are requested upfront from `MainActivity` via
 app/src/main/java/re/chasam/voicetastic/
 ├── MainActivity.kt                  # entry, runtime permissions, VM wiring
 │
+├── core/
+│   ├── NodeIds.kt                   # !aabbccdd ↔ Int helpers
+│   └── Ports.kt                     # Meshtastic port constants
+│
 ├── model/
 │   ├── ChatItem.kt                  # sealed UI model for chat list (text|voice)
 │   ├── MeshNode.kt                  # node roster row
@@ -389,14 +338,19 @@ app/src/main/java/re/chasam/voicetastic/
 │   └── AppNavigation.kt             # 3-tab Scaffold (Devices / Chat / Settings)
 │
 ├── service/
-│   ├── MeshServiceManager.kt        # ★ all the BLE / protobuf plumbing
+│   ├── MeshServiceManager.kt        # ★ orchestrates Rust bridge + StateFlows
+│   ├── BleMeshTransport.kt          # BLE GATT ↔ UniFFI MeshTransport
+│   ├── UsbMeshTransport.kt          # platform USB serial (CDC/FTDI/…)
+│   ├── UsbMeshTransportV2.kt        # USB ↔ UniFFI MeshTransport adapter
+│   ├── RustMeshSession.kt           # lifecycle owner (transport + sink)
+│   ├── MeshSerialFraming.kt         # 0x94 SLIP deframer for USB serial
 │   ├── MeshtasticBle.kt             # GATT UUIDs + node-id helpers
 │   └── Portnums.kt                  # Meshtastic port constants
 │
 ├── ui/
 │   ├── chat/
 │   │   ├── ChatScreen.kt            # message list + composer + record button
-│   │   └── MessagingViewModel.kt    # text + voice send/receive coordination
+│   │   └── MessagingViewModel.kt    # text + voice send/receive (uses UniFFI)
 │   ├── device/
 │   │   └── DeviceScreen.kt          # scan / list / connect / disconnect
 │   └── settings/
@@ -405,17 +359,19 @@ app/src/main/java/re/chasam/voicetastic/
 │
 └── voice/
     ├── VoiceRecorder.kt             # MediaRecorder → AMR-NB bytes
-    ├── VoiceChunker.kt              # strip AMR header, split into ≤231-B chunks
-    ├── VoiceAssembler.kt            # collect chunks by (sender, msgId), timeout, emit
     └── VoicePlayer.kt               # MediaPlayer playback of reassembled AMR
+
+third_party/voicetastic-desktop/     # git submodule
+└── crates/
+    └── voicetastic-android-bridge/  # UniFFI bridge crate → libvoicetastic.so
+        ├── src/voicetastic.udl      # interface definition
+        └── uniffi.toml              # Kotlin bindgen config
 ```
 
 Top-level docs:
 
 | File | Purpose |
 |---|---|
-| `FEATURES.md` (this file) | What the app does + protocols overview |
+| `FEATURES.md` (this file) | What the app does + architecture overview |
 | [`VOICE_PROTOCOL.md`](./VOICE_PROTOCOL.md) | Wire format & assembly rules for voice |
-
-
-
+| [`INTEGRATION.md`](./INTEGRATION.md) | Rust core integration roadmap & progress |

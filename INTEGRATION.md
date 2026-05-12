@@ -179,14 +179,23 @@ Steps 1–4 are **done**. Step 5 is the remaining item.
 4. ~~**Remove scaffolding**~~ — done in PR 5. The `core/` seam package
    is reduced to `NodeIds.kt` and `Ports.kt`; everything else was
    superseded by the UniFFI-generated bindings.
-5. **Adopt voice protocol v2** — TODO. Replace `VoiceChunker` /
-   `VoiceAssembler` with `MeshService.sendVoice` and the Rust core's
-   `voice::VoiceAssembler`.
+5. ~~**Adopt voice protocol v2**~~ — done. `MessagingViewModel` uses
+   Rust `buildMessage` + `VoiceAssembler` via UniFFI for both encode
+   and decode. Legacy `VoiceChunker` / `VoiceAssembler` Kotlin files
+   have been deleted.
 6. ~~**CI**~~ — Rust toolchain and `cargo test` are part of `.gitlab-ci.yml`.
 
-### Known gap
+**All primary integration steps are complete.**
 
-`moduleConfigs` StateFlow is no longer populated — the Rust bridge's
-`MeshConfigListener` does not expose a module-config callback yet.
-Adding it requires an upstream UDL addition in `voicetastic-desktop`.
+### Remaining minor items
+
+- **`moduleConfigs` StateFlow is not populated** — the Rust bridge's
+  `MeshConfigListener` does not expose a module-config callback yet.
+  Adding it requires an upstream UDL addition in `voicetastic-desktop`.
+  The Settings UI field is retained but always empty.
+- **`MeshService.sendVoice` (paced TX)** — the UDL exposes a
+  `send_voice` method with built-in inter-frame pacing, but Kotlin
+  currently calls `buildMessage` + per-frame `sendData` manually.
+  Switching to `sendVoice` would let Rust handle pacing and simplify
+  the ViewModel.
 
