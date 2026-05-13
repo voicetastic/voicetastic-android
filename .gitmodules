@@ -1,4 +1,4 @@
 [submodule "third_party/voicetastic-desktop"]
 	path = third_party/voicetastic-desktop
 	url = git@git.cha-sam.re:acarteron/voicetastic-desktop.git
-	branch = feat/android-bridge-crate
+	branch = main
