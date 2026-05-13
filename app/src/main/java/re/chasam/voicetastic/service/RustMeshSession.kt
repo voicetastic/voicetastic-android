@@ -41,8 +41,19 @@ class RustMeshSession private constructor(
     private val sink: MeshTransportSink,
 ) {
     companion object {
-        /** BLE settle delay matches the legacy manager's empirically-tuned value. */
-        private const val BLE_SETTLE_DELAY_MS: ULong = 800u
+        /**
+         * Delay between "transport ready" and the first `WantConfigId`
+         * write. The upstream desktop core uses 300 ms here
+         * (`CONFIG_REQUEST_DELAY`) to tolerate the indeterminate gap
+         * between a btleplug connect and the radio being responsive.
+         *
+         * On Android we have a precise signal: [BleMeshTransport]'s
+         * [BleMeshTransport.SetupListener.onSetupComplete] fires only
+         * after `onDescriptorWrite` — meaning the CCCD is acknowledged
+         * and the firmware is already armed for inbound traffic. There
+         * is no unknown gap to bridge, so 0 ms is correct.
+         */
+        private const val BLE_SETTLE_DELAY_MS: ULong = 0u
         /** USB has no settle delay; the port is ready on `open`. */
         private const val USB_SETTLE_DELAY_MS: ULong = 0u
         /** How long we wait for [BleMeshTransport]'s setup callback before giving up. */

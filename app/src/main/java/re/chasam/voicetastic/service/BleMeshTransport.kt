@@ -17,13 +17,14 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import uniffi.voicetastic.MeshTransport
 import uniffi.voicetastic.MeshTransportSink
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /**
  * BLE GATT adapter that implements the UniFFI [MeshTransport] foreign
@@ -102,7 +103,39 @@ class BleMeshTransport(
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-    private val bleMutex = Mutex()
+
+    /**
+     * Serialises every GATT op (reads, writes, descriptor writes).
+     *
+     * Android's `BluetoothGatt` only allows one outstanding operation
+     * at a time, so we *must* serialise. We used to do this with a
+     * coroutine `Mutex` which forced [doWrite] to be `suspend`, which
+     * in turn forced the UniFFI callback in [writeToRadio] to wrap
+     * everything in `runBlocking { ... }` — a fresh event loop per
+     * write, plus a blocked Rust runtime worker. A plain
+     * [ReentrantLock] gets us the same serialisation without either
+     * cost: the BLE callbacks and the Rust write path are both
+     * already blocking by design.
+     */
+    private val bleLock = ReentrantLock()
+
+    /**
+     * Counts pending drain requests across notify threads.
+     *
+     * `getAndIncrement` on the producer side and `decrementAndGet` on
+     * the consumer side give us a race-free "did anything ask for a
+     * drain while we were draining?" check, which the previous
+     * `AtomicBoolean` flag could miss: a notify arriving between the
+     * drain finishing and the flag clearing was silently dropped, so
+     * the very last packet of a burst could sit in the firmware
+     * queue until the 30 s safety-net poll picked it up. With the
+     * counter, every increment is matched by exactly one drain pass.
+     *
+     * Modelled on the upstream desktop `Connection::subscribe_inbound`
+     * which drains on every notify; the counter just collapses N
+     * concurrent requests into a single drain task without losing any.
+     */
+    private val drainQueued = AtomicInteger(0)
 
     @Volatile private var sink: MeshTransportSink? = null
     @Volatile private var setupListener: SetupListener? = null
@@ -160,38 +193,48 @@ class BleMeshTransport(
      * Send one already-encoded `ToRadio` protobuf message.
      *
      * Called from Rust via `tokio::task::spawn_blocking`, so blocking
-     * on the GATT callback is OK — the bridge runtime has dedicated
-     * blocking worker threads for exactly this.
+     * directly here is the cheapest option — no coroutine machinery,
+     * no `runBlocking` event loop, just take the GATT lock and write.
      */
     override fun writeToRadio(data: ByteArray) {
         if (closed) {
             Log.w(TAG, "writeToRadio after close; dropping ${data.size} bytes")
             return
         }
-        // We're on a Rust runtime blocking thread; bridge into a
-        // coroutine to share the same bleMutex semantics as inbound
-        // reads. runBlocking is safe because the Rust caller already
-        // expects us to block.
-        kotlinx.coroutines.runBlocking { doWrite(data) }
+        doWrite(data)
     }
 
-    private suspend fun doWrite(bytes: ByteArray) {
+    private fun doWrite(bytes: ByteArray) {
         val gatt = gatt ?: return
         val char = toRadioChar ?: run {
             Log.w(TAG, "writeToRadio before setup; dropping ${bytes.size} bytes")
             return
         }
-        bleMutex.withLock {
+        bleLock.withLock {
             writeSemaphore.drainPermits()
+            // WRITE_TYPE_NO_RESPONSE matches the upstream desktop core's
+            // `WriteType::WithoutResponse` (see
+            // `voicetastic-core/src/ble.rs`). It removes the per-write
+            // GATT ACK round-trip, which on a typical Android stack
+            // costs one full connection interval (~12 ms at HIGH
+            // priority, ~30-50 ms at default). The win compounds on
+            // anything that issues several writes back-to-back: the
+            // initial `WantConfigId` plus the admin-message pulls
+            // (`get_owner`, `get_channel(0..N)`, `get_metadata`) used
+            // to backfill sections that aren't in the auto-burst, and
+            // every voice frame during a send. The Meshtastic firmware
+            // exposes TORADIO as both WRITE and WRITE_NR; the upstream
+            // Rust code has been running on WRITE_NR for ages, so
+            // compatibility is not in question.
             val initiated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 gatt.writeCharacteristic(
-                    char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT,
+                    char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
                 ) == BluetoothStatusCodes.SUCCESS
             } else {
                 @Suppress("DEPRECATION")
                 run {
                     char.value = bytes
-                    char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                    char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
                     gatt.writeCharacteristic(char)
                 }
             }
@@ -199,6 +242,13 @@ class BleMeshTransport(
                 Log.e(TAG, "Failed to initiate BLE write (${bytes.size} bytes)")
                 return@withLock
             }
+            // Even with WRITE_TYPE_NO_RESPONSE, Android fires
+            // `onCharacteristicWrite` once the controller has accepted
+            // the buffer. We still wait for it so back-to-back writes
+            // don't stack up faster than the controller can drain its
+            // own TX queue (which on some stacks silently drops frames
+            // past a small threshold). The wait is now ~one packet
+            // time instead of one full ACK round-trip.
             if (!writeSemaphore.tryAcquire(GATT_OP_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 Log.w(TAG, "BLE write timed out (${bytes.size} bytes)")
             }
@@ -239,11 +289,25 @@ class BleMeshTransport(
         override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
             when (newState) {
                 BluetoothGatt.STATE_CONNECTED -> {
-                    Log.i(TAG, "GATT connected; refreshing cache and requesting MTU")
+                    Log.i(TAG, "GATT connected; requesting HIGH priority + MTU")
                     serviceDiscoveryRetries = 0
-                    refreshGattCache(g)
+                    // Bump the connection interval down to ~7.5–15 ms.
+                    // Default Android priority leaves it around 30–50 ms,
+                    // which throttles the post-`WantConfigId` burst and
+                    // every voice frame send to a fraction of what the
+                    // link can actually carry. We keep HIGH for the whole
+                    // session because voicetastic is bursty (config +
+                    // voice) and the battery cost on the *radio* side is
+                    // negligible compared to its TX duty cycle.
+                    runCatching { g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH) }
+                        .onFailure { Log.w(TAG, "requestConnectionPriority failed", it) }
+                    // MTU first, then services. A *very* short settle
+                    // lets any in-flight bonding callback land before we
+                    // start asking for things; the 600 ms we used to
+                    // wait here was a relic of much older Android
+                    // stacks and just added dead time to every connect.
                     scope.launch {
-                        delay(600)
+                        delay(120)
                         g.requestMtu(MTU_SIZE)
                     }
                 }
@@ -258,7 +322,26 @@ class BleMeshTransport(
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
             Log.i(TAG, "MTU changed to $mtu (status=$status)")
+            // Ask the controller to switch to LE 2M PHY where supported.
+            // The call is a hint — if either side lacks 2M PHY the stack
+            // silently keeps 1M, so this is safe on every radio. On
+            // chips that do support it (ESP32-S3, nRF52, RAK4631, ...)
+            // raw link throughput roughly doubles, which is where the
+            // voice send loop spends most of its time.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                runCatching {
+                    g.setPreferredPhy(
+                        BluetoothDevice.PHY_LE_2M_MASK,
+                        BluetoothDevice.PHY_LE_2M_MASK,
+                        BluetoothDevice.PHY_OPTION_NO_PREFERRED,
+                    )
+                }.onFailure { Log.w(TAG, "setPreferredPhy failed", it) }
+            }
             g.discoverServices()
+        }
+
+        override fun onPhyUpdate(g: BluetoothGatt, txPhy: Int, rxPhy: Int, status: Int) {
+            Log.i(TAG, "PHY update: tx=$txPhy rx=$rxPhy status=$status")
         }
 
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
@@ -368,22 +451,55 @@ class BleMeshTransport(
             MeshtasticBle.FROMNUM_UUID -> {
                 // Legacy firmware: FromNum just signals "there's data";
                 // drain FromRadio reads until empty.
-                scope.launch { drainFromRadio() }
+                scheduleDrain()
             }
             MeshtasticBle.FROMRADIO_UUID -> {
                 // Firmware 2.5+: FromRadio carries the payload directly.
+                // Each notify == one packet, so the on-notify drain we
+                // used to schedule here was serialising a redundant
+                // read behind `bleLock` *between every two notifies*,
+                // which throttled the config burst and voice receive
+                // path. The periodic safety-net `startPolling()` still
+                // catches genuinely missed notifies.
                 if (value.isNotEmpty()) sink?.pushInbound(value)
-                // Also drain any queued packets to stay current.
-                scope.launch { drainFromRadio() }
+                else scheduleDrain()
             }
         }
     }
 
+    /**
+     * Launch a drain unless one is already in flight; if it is, just
+     * note that another drain is needed when the current one finishes.
+     *
+     * The legacy FROMNUM path and the empty-FROMRADIO path can both
+     * fire several times per second during a config burst. Without
+     * coalescing, each fire spawns its own coroutine, every one of
+     * which then queues behind [bleLock] and re-runs the full
+     * read-until-empty loop. The first drain already reads to empty,
+     * so subsequent passes are pure waste — but we still need *one*
+     * follow-up pass per request to handle the race where a notify
+     * arrives between "drain reads empty" and "drain releases the
+     * counter". The counter pattern below guarantees that.
+     */
+    private fun scheduleDrain() {
+        if (drainQueued.getAndIncrement() != 0) return
+        scope.launch {
+            do {
+                drainFromRadio()
+                // decrementAndGet is the linearisation point: any
+                // notify that incremented the counter before this
+                // moment will keep us in the loop; any that
+                // increments after will trigger a fresh launch
+                // because the counter is back at 0.
+            } while (drainQueued.decrementAndGet() != 0)
+        }
+    }
+
     /** Repeatedly read FROMRADIO until the firmware returns an empty payload. */
-    private suspend fun drainFromRadio() {
+    private fun drainFromRadio() {
         val g = gatt ?: return
         val char = fromRadioChar ?: return
-        bleMutex.withLock {
+        bleLock.withLock {
             var attempts = 0
             while (attempts < 100 && !closed) {
                 readSemaphore.drainPermits()
@@ -422,10 +538,7 @@ class BleMeshTransport(
         pollingJob = scope.launch {
             while (!closed) {
                 delay(POLL_INTERVAL_MS)
-                if (setupCompleted) {
-                    runCatching { drainFromRadio() }
-                        .onFailure { Log.w(TAG, "Polling drain failed", it) }
-                }
+                if (setupCompleted) scheduleDrain()
             }
         }
     }

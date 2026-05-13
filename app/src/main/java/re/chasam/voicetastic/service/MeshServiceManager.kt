@@ -9,6 +9,7 @@ import com.geeksville.mesh.MeshProtos
 import com.hoho.android.usbserial.driver.UsbSerialDriver
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
+import re.chasam.voicetastic.core.Ports
 import re.chasam.voicetastic.model.MeshNode
 import uniffi.voicetastic.MeshConfigListener
 import uniffi.voicetastic.MeshConnectionState
@@ -109,6 +110,7 @@ class MeshServiceManager(private val context: Context) {
         usbActive = true
         _activeTransport.value = TransportType.USB
         _connectionState.value = "CONNECTING"
+        configBurstInProgress = true
         val ok = usbTransport.connect(driver)
         if (!ok) {
             usbActive = false
@@ -152,6 +154,7 @@ class MeshServiceManager(private val context: Context) {
      */
     private fun clearSessionState() {
         myNodeNum = 0
+        configBurstInProgress = false
         _myNodeId.value = null
         _firmwareVersion.value = null
         nodeMap.clear()
@@ -171,6 +174,50 @@ class MeshServiceManager(private val context: Context) {
 
     /** Notify when the OS reports a USB device was unplugged. */
     fun onUsbDeviceDetached(device: UsbDevice) = usbTransport.onDeviceDetached(device)
+
+    /**
+     * Insert/update a node in [nodeMap] from a `NODEINFO_APP` MeshPacket.
+     *
+     * Meshtastic firmware emits two distinct streams of NodeInfo:
+     *   1. `FromRadio.NodeInfo` during the initial config burst, for nodes
+     *      already in the device's node DB. The Rust bridge forwards those
+     *      through [MeshConfigListener.onNodeInfo].
+     *   2. On-air `MeshPacket`s with portnum `NODEINFO_APP` and a `User`
+     *      proto payload for every node the radio subsequently hears. The
+     *      Rust core doesn't merge those into the nodes watch, so we have
+     *      to do it here or the chat-node picker would never list anyone
+     *      other than whatever was in the DB at connect time (often only
+     *      ourselves on a fresh radio).
+     */
+    private fun mergeNodeFromUser(nodeNum: Int, payload: ByteArray, rxTime: Long) {
+        val user = runCatching { MeshProtos.User.parseFrom(payload) }.getOrNull() ?: return
+        val existing = nodeMap[nodeNum]
+        val node = MeshNode(
+            nodeId = MeshtasticBle.nodeNumToId(nodeNum),
+            longName = user.longName.ifEmpty { existing?.longName ?: "Unknown" },
+            shortName = user.shortName.ifEmpty { existing?.shortName ?: "??" },
+            lastHeard = if (rxTime != 0L) rxTime else existing?.lastHeard ?: 0L,
+            batteryLevel = existing?.batteryLevel,
+            snr = existing?.snr,
+        )
+        nodeMap[nodeNum] = node
+        _nodes.value = nodeMap.values.toList()
+    }
+
+    /**
+     * Refresh a node's `lastHeard` without overwriting identity fields, for
+     * portnums where we have a timestamp but no `User` proto to merge
+     * (e.g. POSITION_APP, TELEMETRY_APP). Creates a placeholder if we've
+     * never seen this node so the picker still surfaces it.
+     */
+    private fun touchNodeLastHeard(nodeNum: Int, rxTime: Long) {
+        if (rxTime == 0L && nodeMap.containsKey(nodeNum)) return
+        val existing = nodeMap[nodeNum]
+        val node = (existing ?: MeshNode(nodeId = MeshtasticBle.nodeNumToId(nodeNum)))
+            .copy(lastHeard = if (rxTime != 0L) rxTime else existing?.lastHeard ?: 0L)
+        nodeMap[nodeNum] = node
+        _nodes.value = nodeMap.values.toList()
+    }
 
     // --- Per-section config flows ---
     private val _radioConfig = MutableStateFlow<MeshProtos.Config.LoRaConfig?>(null)
@@ -216,6 +263,14 @@ class MeshServiceManager(private val context: Context) {
     val configComplete: SharedFlow<Int> = _configComplete.asSharedFlow()
 
     private val nodeMap = mutableMapOf<Int, MeshNode>()
+
+    /**
+     * True while the initial config burst is in progress (from connect() until
+     * onConfigComplete fires). During this window we suppress per-node
+     * `_nodes.value` emissions and instead emit a single snapshot at the end,
+     * avoiding N StateFlow emissions + N recompositions for a burst of N nodes.
+     */
+    @Volatile private var configBurstInProgress = false
 
     val isConnected: Boolean
         get() = _connectionState.value == "CONNECTED" || _connectionState.value == "CONNECTING"
@@ -272,9 +327,25 @@ class MeshServiceManager(private val context: Context) {
 
         rustService.setDataListener(object : MeshDataListener {
             override fun onData(message: uniffi.voicetastic.IncomingDataMsg) {
-                val fromId = MeshtasticBle.nodeNumToId(message.from.toInt())
+                val fromNum = message.from.toInt()
+                val fromId = MeshtasticBle.nodeNumToId(fromNum)
                 val toId = if (message.to.toInt() == MeshtasticBle.BROADCAST_ADDR) "broadcast"
                 else MeshtasticBle.nodeNumToId(message.to.toInt())
+
+                // Merge live node-DB updates heard over the air.
+                //
+                // The Rust core only feeds `onNodeInfo` from the initial
+                // config burst (the device's pre-existing node DB). Every
+                // subsequent NodeInfo / Position / Telemetry packet heard
+                // on the mesh arrives here as a MeshPacket on its
+                // respective portnum and would otherwise never make it
+                // into `nodeMap` — leaving the chat node picker stuck on
+                // "Broadcast" only.
+                when (message.portnum) {
+                    Ports.NODEINFO_APP -> mergeNodeFromUser(fromNum, message.payload, message.rxTime.toLong())
+                    Ports.POSITION_APP -> touchNodeLastHeard(fromNum, message.rxTime.toLong())
+                }
+
                 _incomingDataMessages.tryEmit(
                     IncomingData(
                         from = fromId,
@@ -309,7 +380,12 @@ class MeshServiceManager(private val context: Context) {
                             snr = if (ni.snr != 0f) ni.snr else null,
                         )
                         nodeMap[ni.num] = node
-                        _nodes.value = nodeMap.values.toList()
+                        // During the config burst we suppress per-node StateFlow
+                        // emissions. A single snapshot is emitted at onConfigComplete,
+                        // cutting N intermediate list allocations + recompositions.
+                        if (!configBurstInProgress) {
+                            _nodes.value = nodeMap.values.toList()
+                        }
                         if (ni.num == myNodeNum && ni.hasUser()) _owner.value = ni.user
                         if (ni.num == myNodeNum && ni.hasPosition()) _myPosition.value = ni.position
                     }
@@ -345,6 +421,10 @@ class MeshServiceManager(private val context: Context) {
             }
 
             override fun onConfigComplete(nonce: UInt) {
+                // Burst is over — emit the full node list once and re-enable
+                // per-node live updates.
+                configBurstInProgress = false
+                _nodes.value = nodeMap.values.toList()
                 _configComplete.tryEmit(nonce.toInt())
             }
         })
@@ -454,6 +534,9 @@ class MeshServiceManager(private val context: Context) {
         stopScan()
         _connectionState.value = "CONNECTING"
         _activeTransport.value = TransportType.BLE
+        // Mark burst in progress so onNodeInfo suppresses intermediate
+        // _nodes.value emissions during the config download.
+        configBurstInProgress = true
         scope.launch {
             runCatching {
                 rustSession?.close()
