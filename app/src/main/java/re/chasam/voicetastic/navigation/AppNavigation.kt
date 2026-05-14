@@ -9,10 +9,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import re.chasam.voicetastic.R
 import re.chasam.voicetastic.service.MeshServiceManager
 import re.chasam.voicetastic.ui.chat.ChatScreen
 import re.chasam.voicetastic.ui.chat.MessagingViewModel
@@ -20,12 +22,10 @@ import re.chasam.voicetastic.ui.device.DeviceScreen
 import re.chasam.voicetastic.ui.settings.ConfigViewModel
 import re.chasam.voicetastic.ui.settings.SettingsScreen
 
-enum class Screen(val route: String, val title: String, val icon: ImageVector) {
-    // Generic "Devices" icon: the screen now lists USB *and* BLE radios, so
-    // the previous Bluetooth glyph implied a single transport.
-    Devices("devices", "Devices", Icons.Default.Devices),
-    Chat("chat", "Chat", Icons.AutoMirrored.Filled.Chat),
-    Settings("settings", "Settings", Icons.Default.Settings)
+enum class Screen(val route: String, val titleResId: Int, val icon: ImageVector) {
+    Devices("devices", R.string.nav_devices, Icons.Default.Devices),
+    Chat("chat", R.string.nav_chat, Icons.AutoMirrored.Filled.Chat),
+    Settings("settings", R.string.nav_settings, Icons.Default.Settings)
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -53,8 +53,8 @@ fun AppNavigation(
             NavigationBar {
                 Screen.entries.forEach { screen ->
                     NavigationBarItem(
-                        icon = { Icon(screen.icon, contentDescription = screen.title) },
-                        label = { Text(screen.title) },
+                        icon = { Icon(screen.icon, contentDescription = stringResource(screen.titleResId)) },
+                        label = { Text(stringResource(screen.titleResId)) },
                         selected = currentRoute == screen.route,
                         onClick = {
                             if (currentRoute != screen.route) {

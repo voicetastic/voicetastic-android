@@ -13,9 +13,11 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import re.chasam.voicetastic.R
 import kotlinx.coroutines.launch
 import re.chasam.voicetastic.model.ChatItem
 import re.chasam.voicetastic.model.MeshNode
@@ -62,21 +64,21 @@ fun ChatScreen(viewModel: MessagingViewModel) {
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Mesh: $connectionState",
+                    text = stringResource(R.string.chat_status_connected, connectionState),
                     style = MaterialTheme.typography.labelMedium,
                     modifier = Modifier.weight(1f)
                 )
                 TextButton(onClick = { showChannelPicker = true }) {
-                    Icon(Icons.Default.Forum, contentDescription = "Select channel", modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.Forum, contentDescription = stringResource(R.string.chat_select_channel), modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
                     val channelLabel = availableChannels.find { it.first == selectedChannel }?.second
-                        ?: "Ch $selectedChannel"
+                        ?: stringResource(R.string.chat_channel_label, selectedChannel)
                     Text(channelLabel)
                 }
                 TextButton(onClick = { showNodePicker = true }) {
-                    Icon(Icons.Default.People, contentDescription = "Select node", modifier = Modifier.size(18.dp))
+                    Icon(Icons.Default.People, contentDescription = stringResource(R.string.chat_select_node), modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(4.dp))
-                    Text(selectedNode?.shortName ?: "Broadcast")
+                    Text(selectedNode?.shortName ?: stringResource(R.string.chat_broadcast))
                 }
             }
         }
@@ -90,7 +92,7 @@ fun ChatScreen(viewModel: MessagingViewModel) {
                     .padding(horizontal = 16.dp, vertical = 4.dp)
             )
             Text(
-                text = "Sending voice message… ${(progress * 100).toInt()}%",
+                text = stringResource(R.string.chat_sending_voice, (progress * 100).toInt()),
                 style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier.padding(horizontal = 16.dp)
             )
@@ -133,12 +135,12 @@ fun ChatScreen(viewModel: MessagingViewModel) {
                     horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
                     OutlinedButton(onClick = { viewModel.cancelRecording() }) {
-                        Icon(Icons.Default.Close, contentDescription = "Cancel")
+                        Icon(Icons.Default.Close, contentDescription = stringResource(R.string.chat_cancel))
                         Spacer(Modifier.width(4.dp))
-                        Text("Cancel")
+                        Text(stringResource(R.string.chat_cancel))
                     }
                     Text(
-                        text = "🔴 Recording…",
+                        text = stringResource(R.string.chat_recording),
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.error
                     )
@@ -148,9 +150,9 @@ fun ChatScreen(viewModel: MessagingViewModel) {
                             containerColor = MaterialTheme.colorScheme.primaryContainer
                         )
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.chat_send))
                         Spacer(Modifier.width(4.dp))
-                        Text("Send")
+                        Text(stringResource(R.string.chat_send))
                     }
                 }
             } else {
@@ -165,7 +167,7 @@ fun ChatScreen(viewModel: MessagingViewModel) {
                         value = inputText,
                         onValueChange = { inputText = it },
                         modifier = Modifier.weight(1f),
-                        placeholder = { Text("Type a message…") },
+                        placeholder = { Text(stringResource(R.string.chat_input_placeholder)) },
                         maxLines = 4,
                         shape = RoundedCornerShape(24.dp)
                     )
@@ -177,7 +179,7 @@ fun ChatScreen(viewModel: MessagingViewModel) {
                     ) {
                         Icon(
                             Icons.Default.Mic,
-                            contentDescription = "Record voice message",
+                            contentDescription = stringResource(R.string.chat_record_voice),
                             tint = if (connectionState == "CONNECTED")
                                 MaterialTheme.colorScheme.primary
                             else
@@ -198,7 +200,7 @@ fun ChatScreen(viewModel: MessagingViewModel) {
                         },
                         enabled = inputText.isNotBlank() && connectionState == "CONNECTED"
                     ) {
-                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "Send")
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = stringResource(R.string.chat_send))
                     }
                 }
             }
@@ -303,7 +305,7 @@ private fun VoiceMessageBubble(
                 IconButton(onClick = onPlayClick) {
                     Icon(
                         if (isPlaying) Icons.Default.Stop else Icons.Default.PlayArrow,
-                        contentDescription = if (isPlaying) "Stop" else "Play"
+                        contentDescription = if (isPlaying) stringResource(R.string.chat_stop) else stringResource(R.string.chat_play)
                     )
                 }
                 Column(modifier = Modifier.weight(1f)) {
@@ -316,8 +318,8 @@ private fun VoiceMessageBubble(
                         )
                     }
                     Text(
-                        text = "🎤 Voice · ${item.audioData.size / 1024}KB" +
-                                if (!item.isComplete) " (${item.receivedChunks}/${item.totalChunks})" else "",
+                        text = stringResource(R.string.chat_voice_label, item.audioData.size / 1024) +
+                                if (!item.isComplete) " ${stringResource(R.string.chat_voice_incomplete, item.receivedChunks, item.totalChunks)}" else "",
                         style = MaterialTheme.typography.bodySmall
                     )
                     Text(
@@ -329,7 +331,7 @@ private fun VoiceMessageBubble(
                 if (!item.isComplete) {
                     Icon(
                         Icons.Default.Warning,
-                        contentDescription = "Incomplete",
+                        contentDescription = stringResource(R.string.chat_incomplete),
                         tint = MaterialTheme.colorScheme.error,
                         modifier = Modifier.size(16.dp)
                     )
@@ -348,12 +350,12 @@ private fun NodePickerDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Send to") },
+        title = { Text(stringResource(R.string.chat_send_to_title)) },
         text = {
             LazyColumn {
                 item {
                     ListItem(
-                        headlineContent = { Text("Broadcast (all nodes)") },
+                        headlineContent = { Text(stringResource(R.string.chat_broadcast_all)) },
                         modifier = Modifier.clickable { onNodeSelected(null) },
                         colors = ListItemDefaults.colors(
                             containerColor = if (selectedNode == null)
@@ -380,7 +382,7 @@ private fun NodePickerDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.chat_cancel)) }
         }
     )
 }
@@ -394,13 +396,13 @@ private fun ChannelPickerDialog(
 ) {
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Select Channel") },
+        title = { Text(stringResource(R.string.chat_select_channel_title)) },
         text = {
             LazyColumn {
                 items(channels) { (index, name) ->
                     ListItem(
-                        headlineContent = { Text(name.ifBlank { "Channel $index" }) },
-                        supportingContent = { Text("Channel $index") },
+                        headlineContent = { Text(name.ifBlank { stringResource(R.string.chat_channel_entry, index) }) },
+                        supportingContent = { Text(stringResource(R.string.chat_channel_entry, index)) },
                         modifier = Modifier.clickable { onChannelSelected(index) },
                         colors = ListItemDefaults.colors(
                             containerColor = if (selectedChannel == index)
@@ -413,7 +415,7 @@ private fun ChannelPickerDialog(
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel") }
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.chat_cancel)) }
         }
     )
 }

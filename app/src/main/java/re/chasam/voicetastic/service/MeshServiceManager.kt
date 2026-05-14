@@ -1,7 +1,7 @@
 package re.chasam.voicetastic.service
 
 import android.annotation.SuppressLint
-import android.bluetooth.*
+import android.bluetooth.BluetoothDevice
 import android.content.Context
 import android.hardware.usb.UsbDevice
 import android.util.Log
@@ -18,10 +18,6 @@ import uniffi.voicetastic.MeshService
 import uniffi.voicetastic.MeshStateListener
 import uniffi.voicetastic.MeshTextListener
 
-/**
- * Manages direct BLE connection to a Meshtastic device.
- * No Meshtastic Android app required.
- */
 class MeshServiceManager(private val context: Context) {
 
     companion object {
@@ -32,11 +28,13 @@ class MeshServiceManager(private val context: Context) {
     data class IncomingData(val from: String, val to: String, val portNum: Int, val payload: ByteArray, val channel: Int = 0, val timestamp: Long = System.currentTimeMillis())
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+    val deviceDiscovery = DeviceDiscoveryManager(context)
+
     private val rustService: MeshService = MeshService()
     private var rustSession: RustMeshSession? = null
 
     private var myNodeNum: Int = 0
-
 
     // --- Public state flows ---
     private val _connectionState = MutableStateFlow("DISCONNECTED")
@@ -57,18 +55,10 @@ class MeshServiceManager(private val context: Context) {
     private val _firmwareVersion = MutableStateFlow<String?>(null)
     val firmwareVersion: StateFlow<String?> = _firmwareVersion.asStateFlow()
 
-    private val _discoveredDevices = MutableStateFlow<List<BluetoothDevice>>(emptyList())
-    val discoveredDevices: StateFlow<List<BluetoothDevice>> = _discoveredDevices.asStateFlow()
-
-    private val _isScanning = MutableStateFlow(false)
-    val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
+    val discoveredDevices: StateFlow<List<BluetoothDevice>> = deviceDiscovery.discoveredBleDevices
+    val isScanning: StateFlow<Boolean> = deviceDiscovery.isScanning
 
     // ==========  USB TRANSPORT  ==========
-    //
-    // BLE remains the default; USB runs alongside as an alternative transport
-    // for Meshtastic nodes connected via a USB-OTG cable. Only one transport
-    // is active at a time. When `usbActive` is true, writeToRadio() goes out
-    // over USB and BLE writes are short-circuited.
 
     enum class TransportType { NONE, BLE, USB }
 
@@ -90,20 +80,13 @@ class MeshServiceManager(private val context: Context) {
     // so they MUST already be initialised. Kotlin runs initialisers in
     // declaration order, hence the deliberate placement.
 
-    /** Enumerate USB serial drivers that look like Meshtastic devices. */
-    fun discoverUsbDevices(): List<UsbSerialDriver> = usbTransport.discoverDevices()
+    fun discoverUsbDevices(): List<UsbSerialDriver> = deviceDiscovery.discoverUsbDevices()
 
     fun usbHasPermission(device: UsbDevice): Boolean = usbTransport.hasPermission(device)
 
     fun requestUsbPermission(device: UsbDevice, onResult: (Boolean) -> Unit) =
         usbTransport.requestPermission(device, onResult)
 
-    /**
-     * Connect over USB. If a BLE link is currently active it is dropped first
-     * (only one transport at a time).
-     *
-     * @return true if the open succeeded.
-     */
     fun connectUsb(driver: UsbSerialDriver): Boolean {
         runCatching { rustSession?.close() }
         rustSession = null
@@ -137,21 +120,11 @@ class MeshServiceManager(private val context: Context) {
         usbTransport.disconnect()
         usbActive = false
         _activeTransport.value = TransportType.NONE
-        // Mirror disconnectBle(): drop per-session state so a subsequent
-        // attach (possibly to a different node) starts from a clean slate.
-        // Without this, myNodeNum / cached configs from a prior session
-        // leak across reconnects and break sendAdminMessage()'s gate
-        // (`!isConnected || myNodeNum == 0`) → "Failed to send …".
         clearSessionState()
         _connectionState.value = "DISCONNECTED"
         Log.i(TAG, "Disconnected (USB)")
     }
 
-    /**
-     * Per-connection node/config caches. Cleared on either transport tearing down
-     * so that the next connection (possibly to a different physical radio) starts
-     * from a known state.
-     */
     private fun clearSessionState() {
         myNodeNum = 0
         configBurstInProgress = false
@@ -172,23 +145,8 @@ class MeshServiceManager(private val context: Context) {
         _moduleConfigs.value = emptyMap()
     }
 
-    /** Notify when the OS reports a USB device was unplugged. */
     fun onUsbDeviceDetached(device: UsbDevice) = usbTransport.onDeviceDetached(device)
 
-    /**
-     * Insert/update a node in [nodeMap] from a `NODEINFO_APP` MeshPacket.
-     *
-     * Meshtastic firmware emits two distinct streams of NodeInfo:
-     *   1. `FromRadio.NodeInfo` during the initial config burst, for nodes
-     *      already in the device's node DB. The Rust bridge forwards those
-     *      through [MeshConfigListener.onNodeInfo].
-     *   2. On-air `MeshPacket`s with portnum `NODEINFO_APP` and a `User`
-     *      proto payload for every node the radio subsequently hears. The
-     *      Rust core doesn't merge those into the nodes watch, so we have
-     *      to do it here or the chat-node picker would never list anyone
-     *      other than whatever was in the DB at connect time (often only
-     *      ourselves on a fresh radio).
-     */
     private fun mergeNodeFromUser(nodeNum: Int, payload: ByteArray, rxTime: Long) {
         val user = runCatching { MeshProtos.User.parseFrom(payload) }.getOrNull() ?: return
         val existing = nodeMap[nodeNum]
@@ -204,12 +162,6 @@ class MeshServiceManager(private val context: Context) {
         _nodes.value = nodeMap.values.toList()
     }
 
-    /**
-     * Refresh a node's `lastHeard` without overwriting identity fields, for
-     * portnums where we have a timestamp but no `User` proto to merge
-     * (e.g. POSITION_APP, TELEMETRY_APP). Creates a placeholder if we've
-     * never seen this node so the picker still surfaces it.
-     */
     private fun touchNodeLastHeard(nodeNum: Int, rxTime: Long) {
         if (rxTime == 0L && nodeMap.containsKey(nodeNum)) return
         val existing = nodeMap[nodeNum]
@@ -229,11 +181,6 @@ class MeshServiceManager(private val context: Context) {
     private val _positionConfig = MutableStateFlow<MeshProtos.Config.PositionConfig?>(null)
     val positionConfig: StateFlow<MeshProtos.Config.PositionConfig?> = _positionConfig.asStateFlow()
 
-    /**
-     * Last-known Position reported by our own NodeInfo. Used to seed the
-     * "Fixed Position" editor in Settings so the user can edit and re-send
-     * lat/lon/altitude rather than starting from zeros.
-     */
     private val _myPosition = MutableStateFlow<MeshProtos.Position?>(null)
     val myPosition: StateFlow<MeshProtos.Position?> = _myPosition.asStateFlow()
 
@@ -258,40 +205,17 @@ class MeshServiceManager(private val context: Context) {
     private val _moduleConfigs = MutableStateFlow<Map<String, MeshProtos.ModuleConfig>>(emptyMap())
     val moduleConfigs: StateFlow<Map<String, MeshProtos.ModuleConfig>> = _moduleConfigs.asStateFlow()
 
-    /** Emits the firmware's configCompleteId after a config burst finishes. */
     private val _configComplete = MutableSharedFlow<Int>(extraBufferCapacity = 8)
     val configComplete: SharedFlow<Int> = _configComplete.asSharedFlow()
 
     private val nodeMap = mutableMapOf<Int, MeshNode>()
 
-    /**
-     * True while the initial config burst is in progress (from connect() until
-     * onConfigComplete fires). During this window we suppress per-node
-     * `_nodes.value` emissions and instead emit a single snapshot at the end,
-     * avoiding N StateFlow emissions + N recompositions for a burst of N nodes.
-     */
     @Volatile private var configBurstInProgress = false
 
     val isConnected: Boolean
         get() = _connectionState.value == "CONNECTED" || _connectionState.value == "CONNECTING"
 
     init {
-        // Register Rust-side listeners synchronously.
-        //
-        // This MUST happen after every StateFlow / SharedFlow / nodeMap field
-        // above is declared: `setStateListener` immediately fires
-        // `on_state(current_state)` with `Disconnected`, which re-enters
-        // Kotlin and ends up calling `clearSessionState()` — that touches
-        // `nodeMap`, `_radioConfig`, `_channels`, `_moduleConfigs`, ... so
-        // any of those still being null produces an NPE inside a UniFFI
-        // callback (surfaced as
-        // `InternalException: Callback interface failure ...
-        //  NullPointerException: ... on a null object reference`).
-        //
-        // The previous design used `scope.launch { ... }` to dodge this
-        // ordering issue at the cost of racing user-initiated connects;
-        // doing it synchronously here — but AFTER all fields are
-        // initialised — is correct on both counts.
         rustService.setStateListener(object : MeshStateListener {
             override fun onState(state: MeshConnectionState) {
                 val mapped = when (state) {
@@ -299,7 +223,7 @@ class MeshServiceManager(private val context: Context) {
                     MeshConnectionState.CONNECTING, MeshConnectionState.CONFIGURING -> "CONNECTING"
                     MeshConnectionState.DISCONNECTED -> "DISCONNECTED"
                 }
-                Log.d(TAG, "Rust state → $state (mapped=$mapped)")
+                Log.d(TAG, "Rust state -> $state (mapped=$mapped)")
                 _connectionState.value = mapped
                 if (state == MeshConnectionState.DISCONNECTED) {
                     clearSessionState()
@@ -332,15 +256,6 @@ class MeshServiceManager(private val context: Context) {
                 val toId = if (message.to.toInt() == MeshtasticBle.BROADCAST_ADDR) "broadcast"
                 else MeshtasticBle.nodeNumToId(message.to.toInt())
 
-                // Merge live node-DB updates heard over the air.
-                //
-                // The Rust core only feeds `onNodeInfo` from the initial
-                // config burst (the device's pre-existing node DB). Every
-                // subsequent NodeInfo / Position / Telemetry packet heard
-                // on the mesh arrives here as a MeshPacket on its
-                // respective portnum and would otherwise never make it
-                // into `nodeMap` — leaving the chat node picker stuck on
-                // "Broadcast" only.
                 when (message.portnum) {
                     Ports.NODEINFO_APP -> mergeNodeFromUser(fromNum, message.payload, message.rxTime.toLong())
                     Ports.POSITION_APP -> touchNodeLastHeard(fromNum, message.rxTime.toLong())
@@ -380,9 +295,6 @@ class MeshServiceManager(private val context: Context) {
                             snr = if (ni.snr != 0f) ni.snr else null,
                         )
                         nodeMap[ni.num] = node
-                        // During the config burst we suppress per-node StateFlow
-                        // emissions. A single snapshot is emitted at onConfigComplete,
-                        // cutting N intermediate list allocations + recompositions.
                         if (!configBurstInProgress) {
                             _nodes.value = nodeMap.values.toList()
                         }
@@ -421,8 +333,6 @@ class MeshServiceManager(private val context: Context) {
             }
 
             override fun onConfigComplete(nonce: UInt) {
-                // Burst is over — emit the full node list once and re-enable
-                // per-node live updates.
                 configBurstInProgress = false
                 _nodes.value = nodeMap.values.toList()
                 _configComplete.tryEmit(nonce.toInt())
@@ -430,112 +340,18 @@ class MeshServiceManager(private val context: Context) {
         })
     }
 
-
     // ==========  BLE SCANNING  ==========
-    //
-    // The Rust bridge does not expose device discovery on Android (the
-    // `ble-btleplug` feature is desktop-only). We keep the BLE scan
-    // implemented natively here using `BluetoothLeScanner`; only the
-    // connect/I-O path is delegated to Rust via `RustMeshSession`.
 
-    private val scanCallback = object : android.bluetooth.le.ScanCallback() {
-        @SuppressLint("MissingPermission")
-        override fun onScanResult(
-            callbackType: Int,
-            result: android.bluetooth.le.ScanResult,
-        ) {
-            val device = result.device ?: return
-            val current = _discoveredDevices.value
-            if (current.none { it.address == device.address }) {
-                _discoveredDevices.value = current + device
-                Log.i(TAG, "Found Meshtastic device: ${device.name ?: device.address}")
-            }
-        }
-
-        override fun onScanFailed(errorCode: Int) {
-            Log.e(TAG, "BLE scan failed: $errorCode")
-            _isScanning.value = false
-        }
-    }
-
-    /** Resolve the system Bluetooth adapter via BluetoothManager (API 18+). */
-    private fun bluetoothAdapter(): android.bluetooth.BluetoothAdapter? {
-        val manager = context.getSystemService(Context.BLUETOOTH_SERVICE)
-            as? android.bluetooth.BluetoothManager
-        return manager?.adapter
-    }
-
-    @SuppressLint("MissingPermission")
-    fun startScan() {
-        val adapter = bluetoothAdapter()
-        if (adapter == null) {
-            Log.w(TAG, "startScan: no Bluetooth adapter")
-            return
-        }
-        if (!adapter.isEnabled) {
-            Log.w(TAG, "startScan: Bluetooth disabled")
-            return
-        }
-        val scanner = adapter.bluetoothLeScanner
-        if (scanner == null) {
-            Log.w(TAG, "startScan: bluetoothLeScanner unavailable")
-            return
-        }
-        if (_isScanning.value) {
-            Log.d(TAG, "startScan: already scanning")
-            return
-        }
-        _discoveredDevices.value = emptyList()
-        _isScanning.value = true
-
-        val filter = android.bluetooth.le.ScanFilter.Builder()
-            .setServiceUuid(android.os.ParcelUuid(MeshtasticBle.SERVICE_UUID))
-            .build()
-        val settings = android.bluetooth.le.ScanSettings.Builder()
-            .setScanMode(android.bluetooth.le.ScanSettings.SCAN_MODE_LOW_LATENCY)
-            .build()
-
-        try {
-            scanner.startScan(listOf(filter), settings, scanCallback)
-            Log.i(TAG, "BLE scan started")
-        } catch (e: Exception) {
-            Log.e(TAG, "BLE scan failed to start", e)
-            _isScanning.value = false
-            return
-        }
-
-        // Stop automatically after 15s — Android caps background scans
-        // anyway and an indefinite scan drains the battery.
-        scope.launch {
-            delay(15_000)
-            stopScan()
-        }
-    }
-
-    @SuppressLint("MissingPermission")
-    fun stopScan() {
-        if (!_isScanning.value) return
-        try {
-            bluetoothAdapter()?.bluetoothLeScanner?.stopScan(scanCallback)
-        } catch (e: Exception) {
-            Log.w(TAG, "stopScan threw", e)
-        }
-        _isScanning.value = false
-        Log.i(TAG, "BLE scan stopped")
-    }
+    fun startScan() = deviceDiscovery.startBleScan()
+    fun stopScan() = deviceDiscovery.stopBleScan()
 
     // ==========  BLE CONNECTION  ==========
 
     @SuppressLint("MissingPermission")
     fun connect(device: BluetoothDevice) {
-        // Stop scanning before opening GATT — Android serialises scan +
-        // connect on the same radio and an active scan can wedge the
-        // GATT setup.
         stopScan()
         _connectionState.value = "CONNECTING"
         _activeTransport.value = TransportType.BLE
-        // Mark burst in progress so onNodeInfo suppresses intermediate
-        // _nodes.value emissions during the config download.
         configBurstInProgress = true
         scope.launch {
             runCatching {
@@ -559,23 +375,18 @@ class MeshServiceManager(private val context: Context) {
         _connectionState.value = "DISCONNECTED"
     }
 
-
     fun unbind() = disconnect()
 
     fun destroy() {
         disconnect()
         usbTransport.destroy()
+        deviceDiscovery.destroy()
         runCatching { rustService.close() }
         scope.cancel()
     }
 
-
     // ==========  MESHTASTIC PROTOCOL  ==========
 
-    /**
-     * Request full device configuration from the connected node.
-     * Public so the UI can trigger a re-read.
-     */
     fun refreshConfig() {
         if (!isConnected) return
         runCatching { rustService.refreshConfig() }
@@ -615,7 +426,6 @@ class MeshServiceManager(private val context: Context) {
         }
     }
 
-
     // ==========  SENDING  ==========
 
     fun sendText(text: String, destination: String? = null, channel: Int = 0): Boolean {
@@ -624,10 +434,6 @@ class MeshServiceManager(private val context: Context) {
             return false
         }
 
-        // Rust's `send_text` takes `Option<u32>` for dest. Mapping the
-        // Meshtastic BROADCAST_ADDR (0xFFFFFFFF) to `null` makes the Rust
-        // side correctly omit `want_ack` (firmware silently drops acks for
-        // broadcast packets, so requesting one would just stall the queue).
         val destUInt: UInt? = if (destination != null) {
             MeshtasticBle.nodeIdToNum(destination)?.toUInt() ?: run {
                 Log.e(TAG, "Invalid destination node ID: $destination")
@@ -672,7 +478,6 @@ class MeshServiceManager(private val context: Context) {
         }
     }
 
-
     // ==========  ADMIN CONFIG WRITES (local node only)  ==========
 
     private fun sendAdminMessage(admin: MeshProtos.AdminMessage): Boolean {
@@ -685,11 +490,6 @@ class MeshServiceManager(private val context: Context) {
         }
     }
 
-
-    /**
-     * Write a Config section (LoRa, Device, Position, Power, Network, Display, Bluetooth)
-     * to the local connected device.
-     */
     fun writeConfig(config: MeshProtos.Config): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setSetConfig(config)
@@ -697,9 +497,6 @@ class MeshServiceManager(private val context: Context) {
         return sendAdminMessage(admin)
     }
 
-    /**
-     * Write a ModuleConfig section to the local connected device.
-     */
     fun writeModuleConfig(moduleConfig: MeshProtos.ModuleConfig): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setSetModuleConfig(moduleConfig)
@@ -707,11 +504,6 @@ class MeshServiceManager(private val context: Context) {
         return sendAdminMessage(admin)
     }
 
-    /**
-     * Send a Position to be stored on the device as its manually-fixed
-     * location. The device must also have PositionConfig.fixed_position=true
-     * for this to take effect on subsequent broadcasts.
-     */
     fun setFixedPosition(position: MeshProtos.Position): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setSetFixedPosition(position)
@@ -719,9 +511,6 @@ class MeshServiceManager(private val context: Context) {
         return sendAdminMessage(admin)
     }
 
-    /**
-     * Clear any previously-set fixed position on the device.
-     */
     fun removeFixedPosition(): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setRemoveFixedPosition(true)
@@ -729,9 +518,6 @@ class MeshServiceManager(private val context: Context) {
         return sendAdminMessage(admin)
     }
 
-    /**
-     * Write a Channel configuration to the local connected device.
-     */
     fun writeChannel(channel: MeshProtos.Channel): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setSetChannel(channel)
@@ -739,9 +525,6 @@ class MeshServiceManager(private val context: Context) {
         return sendAdminMessage(admin)
     }
 
-    /**
-     * Write the User/Owner info to the local connected device.
-     */
     fun writeOwner(user: MeshProtos.User): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setSetOwner(user)
@@ -749,9 +532,6 @@ class MeshServiceManager(private val context: Context) {
         return sendAdminMessage(admin)
     }
 
-    /**
-     * Reboot the device after the specified number of seconds.
-     */
     fun rebootDevice(seconds: Int = 5): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setRebootSeconds(seconds)
@@ -759,9 +539,6 @@ class MeshServiceManager(private val context: Context) {
         return sendAdminMessage(admin)
     }
 
-    /**
-     * Factory reset the device.
-     */
     fun factoryReset(): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setFactoryResetConfig(1)

@@ -11,10 +11,12 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
+import re.chasam.voicetastic.R
 import re.chasam.voicetastic.model.AmrNbBitrate
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -57,14 +59,14 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                 Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Column(modifier = Modifier.weight(1f)) {
-                            Text("Meshtastic: $connectionState", style = MaterialTheme.typography.titleMedium)
+                            Text(stringResource(R.string.settings_status_format, connectionState), style = MaterialTheme.typography.titleMedium)
                             if (connectionState == "CONNECTED") {
-                                myNodeId?.let { Text("Node: $it", style = MaterialTheme.typography.bodySmall) }
-                                firmwareVersion?.let { Text("Firmware: $it", style = MaterialTheme.typography.bodySmall) }
+                                myNodeId?.let { Text(stringResource(R.string.settings_node_id, it), style = MaterialTheme.typography.bodySmall) }
+                                firmwareVersion?.let { Text(stringResource(R.string.settings_firmware, it), style = MaterialTheme.typography.bodySmall) }
                             }
                         }
                         IconButton(onClick = { viewModel.refreshDeviceConfig() }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "Refresh config")
+                            Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.settings_refresh_config))
                         }
                     }
                 }
@@ -80,7 +82,7 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(status, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                        TextButton(onClick = { viewModel.clearStatus() }) { Text("Dismiss") }
+                        TextButton(onClick = { viewModel.clearStatus() }) { Text(stringResource(R.string.settings_dismiss)) }
                     }
                 }
             }
@@ -88,11 +90,11 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
 
         // ===== Owner =====
         item {
-            ExpandableConfigCard(title = "User / Owner", icon = Icons.Default.Person) {
+            ExpandableConfigCard(title = stringResource(R.string.settings_user_owner), icon = Icons.Default.Person) {
                 OutlinedTextField(
                     value = ownerState.longName,
                     onValueChange = { viewModel.setOwnerLongName(it) },
-                    label = { Text("Long Name") },
+                    label = { Text(stringResource(R.string.settings_long_name)) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
@@ -100,42 +102,42 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                 OutlinedTextField(
                     value = ownerState.shortName,
                     onValueChange = { viewModel.setOwnerShortName(it) },
-                    label = { Text("Short Name (max 4)") },
+                    label = { Text(stringResource(R.string.settings_short_name)) },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
                 Spacer(Modifier.height(8.dp))
-                SwitchSetting("Licensed (HAM)", ownerState.isLicensed) { viewModel.setOwnerIsLicensed(it) }
+                SwitchSetting(stringResource(R.string.settings_licensed), ownerState.isLicensed) { viewModel.setOwnerIsLicensed(it) }
                 Spacer(Modifier.height(8.dp))
                 Button(onClick = { viewModel.applyOwner() }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Apply Owner")
+                    Text(stringResource(R.string.settings_apply_owner))
                 }
             }
         }
 
         // ===== LoRa =====
         item {
-            ExpandableConfigCard(title = "LoRa / Radio", icon = Icons.Default.Settings) {
-                EnumDropdownSetting("Region", viewModel.regions, loraState.region) { viewModel.setLoraRegion(it) }
+            ExpandableConfigCard(title = stringResource(R.string.settings_lora_radio), icon = Icons.Default.Settings) {
+                EnumDropdownSetting(stringResource(R.string.settings_region), viewModel.regions, loraState.region) { viewModel.setLoraRegion(it) }
                 Spacer(Modifier.height(8.dp))
-                SwitchSetting("Use Preset", loraState.usePreset) { viewModel.setLoraUsePreset(it) }
+                SwitchSetting(stringResource(R.string.settings_use_preset), loraState.usePreset) { viewModel.setLoraUsePreset(it) }
                 if (loraState.usePreset) {
                     Spacer(Modifier.height(8.dp))
-                    EnumDropdownSetting("Modem Preset", viewModel.modemPresets, loraState.modemPreset) { viewModel.setLoraModemPreset(it) }
+                    EnumDropdownSetting(stringResource(R.string.settings_modem_preset), viewModel.modemPresets, loraState.modemPreset) { viewModel.setLoraModemPreset(it) }
                 } else {
                     Spacer(Modifier.height(8.dp))
-                    NumberFieldSetting("Bandwidth (kHz)", loraState.bandwidth) { viewModel.setLoraBandwidth(it) }
+                    NumberFieldSetting(stringResource(R.string.settings_bandwidth), loraState.bandwidth) { viewModel.setLoraBandwidth(it) }
                     Spacer(Modifier.height(8.dp))
-                    NumberFieldSetting("Spread Factor", loraState.spreadFactor) { viewModel.setLoraSpreadFactor(it) }
+                    NumberFieldSetting(stringResource(R.string.settings_spread_factor), loraState.spreadFactor) { viewModel.setLoraSpreadFactor(it) }
                     Spacer(Modifier.height(8.dp))
-                    NumberFieldSetting("Coding Rate", loraState.codingRate) { viewModel.setLoraCodingRate(it) }
+                    NumberFieldSetting(stringResource(R.string.settings_coding_rate), loraState.codingRate) { viewModel.setLoraCodingRate(it) }
                 }
                 Spacer(Modifier.height(8.dp))
-                NumberFieldSetting("Hop Limit (1–7)", loraState.hopLimit) { viewModel.setLoraHopLimit(it) }
+                NumberFieldSetting(stringResource(R.string.settings_hop_limit), loraState.hopLimit) { viewModel.setLoraHopLimit(it) }
                 Spacer(Modifier.height(8.dp))
-                NumberFieldSetting("Tx Power (dBm)", loraState.txPower) { viewModel.setLoraTxPower(it) }
+                NumberFieldSetting(stringResource(R.string.settings_tx_power), loraState.txPower) { viewModel.setLoraTxPower(it) }
                 Spacer(Modifier.height(8.dp))
-                SwitchSetting("Tx Enabled", loraState.txEnabled) { viewModel.setLoraTxEnabled(it) }
+                SwitchSetting(stringResource(R.string.settings_tx_enabled), loraState.txEnabled) { viewModel.setLoraTxEnabled(it) }
                 Spacer(Modifier.height(8.dp))
                 SwitchSetting("Override Duty Cycle", loraState.overrideDutyCycle) { viewModel.setLoraOverrideDutyCycle(it) }
                 Spacer(Modifier.height(8.dp))
@@ -150,15 +152,15 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                 FloatFieldSetting("Override Frequency (MHz)", loraState.overrideFrequency) { viewModel.setLoraOverrideFrequency(it) }
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = { viewModel.applyLoraConfig() }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Apply LoRa Config")
+                    Text(stringResource(R.string.settings_apply_lora))
                 }
             }
         }
 
         // ===== Device =====
         item {
-            ExpandableConfigCard(title = "Device", icon = Icons.Default.PhoneAndroid) {
-                EnumDropdownSetting("Role", viewModel.deviceRoles, deviceState.role) { viewModel.setDeviceRole(it) }
+            ExpandableConfigCard(title = stringResource(R.string.settings_device), icon = Icons.Default.PhoneAndroid) {
+                EnumDropdownSetting(stringResource(R.string.settings_role), viewModel.deviceRoles, deviceState.role) { viewModel.setDeviceRole(it) }
                 Spacer(Modifier.height(8.dp))
                 EnumDropdownSetting("Rebroadcast Mode", viewModel.rebroadcastModes, deviceState.rebroadcastMode) { viewModel.setDeviceRebroadcastMode(it) }
                 Spacer(Modifier.height(8.dp))
@@ -179,14 +181,14 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                 NumberFieldSetting("Buzzer GPIO", deviceState.buzzerGpio) { viewModel.setDeviceBuzzerGpio(it) }
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = { viewModel.applyDeviceConfig() }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Apply Device Config")
+                    Text(stringResource(R.string.settings_apply_device))
                 }
             }
         }
 
         // ===== Position =====
         item {
-            ExpandableConfigCard(title = "Position", icon = Icons.Default.LocationOn) {
+            ExpandableConfigCard(title = stringResource(R.string.settings_position), icon = Icons.Default.LocationOn) {
                 EnumDropdownSetting("GPS Mode", viewModel.gpsModes, positionState.gpsMode) { viewModel.setPositionGpsMode(it) }
                 Spacer(Modifier.height(8.dp))
                 SwitchSetting("GPS Enabled", positionState.gpsEnabled) { viewModel.setPositionGpsEnabled(it) }
@@ -222,14 +224,14 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                 NumberFieldSetting("Smart Min Interval (s)", positionState.broadcastSmartMinimumIntervalSecs) { viewModel.setPositionSmartMinInterval(it) }
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = { viewModel.applyPositionConfig() }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Apply Position Config")
+                    Text(stringResource(R.string.settings_apply_position))
                 }
             }
         }
 
         // ===== Power =====
         item {
-            ExpandableConfigCard(title = "Power", icon = Icons.Default.BatteryChargingFull) {
+            ExpandableConfigCard(title = stringResource(R.string.settings_power), icon = Icons.Default.BatteryChargingFull) {
                 SwitchSetting("Power Saving", powerState.isPowerSaving) { viewModel.setPowerSaving(it) }
                 Spacer(Modifier.height(8.dp))
                 SwitchSetting("Shutdown on Power Loss", powerState.shutdownOnPowerLoss) { viewModel.setPowerShutdownOnPowerLoss(it) }
@@ -247,14 +249,14 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                 FloatFieldSetting("ADC Multiplier Override", powerState.adcMultiplierOverride) { viewModel.setPowerAdcMultiplier(it) }
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = { viewModel.applyPowerConfig() }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Apply Power Config")
+                    Text(stringResource(R.string.settings_apply_power))
                 }
             }
         }
 
         // ===== Network =====
         item {
-            ExpandableConfigCard(title = "Network", icon = Icons.Default.Wifi) {
+            ExpandableConfigCard(title = stringResource(R.string.settings_network), icon = Icons.Default.Wifi) {
                 SwitchSetting("WiFi Enabled", networkState.wifiEnabled) { viewModel.setNetworkWifiEnabled(it) }
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
@@ -288,14 +290,14 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                 )
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = { viewModel.applyNetworkConfig() }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Apply Network Config")
+                    Text(stringResource(R.string.settings_apply_network))
                 }
             }
         }
 
         // ===== Display =====
         item {
-            ExpandableConfigCard(title = "Display", icon = Icons.Default.Tv) {
+            ExpandableConfigCard(title = stringResource(R.string.settings_display), icon = Icons.Default.Tv) {
                 NumberFieldSetting("Screen On (s)", displayState.screenOnSecs) { viewModel.setDisplayScreenOnSecs(it) }
                 Spacer(Modifier.height(8.dp))
                 NumberFieldSetting("Auto Carousel (s)", displayState.autoScreenCarouselSecs) { viewModel.setDisplayAutoCarouselSecs(it) }
@@ -317,14 +319,14 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                 SwitchSetting("Wake on Tap/Motion", displayState.wakeOnTapOrMotion) { viewModel.setDisplayWakeOnTapOrMotion(it) }
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = { viewModel.applyDisplayConfig() }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Apply Display Config")
+                    Text(stringResource(R.string.settings_apply_display))
                 }
             }
         }
 
         // ===== Bluetooth =====
         item {
-            ExpandableConfigCard(title = "Bluetooth", icon = Icons.Default.Bluetooth) {
+            ExpandableConfigCard(title = stringResource(R.string.settings_bluetooth), icon = Icons.Default.Bluetooth) {
                 SwitchSetting("Enabled", bluetoothState.enabled) { viewModel.setBluetoothEnabled(it) }
                 Spacer(Modifier.height(8.dp))
                 EnumDropdownSetting("Pairing Mode", viewModel.pairingModes, bluetoothState.mode) { viewModel.setBluetoothMode(it) }
@@ -332,16 +334,16 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                 SecretNumberFieldSetting("Fixed PIN", bluetoothState.fixedPin) { viewModel.setBluetoothFixedPin(it) }
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = { viewModel.applyBluetoothConfig() }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Apply Bluetooth Config")
+                    Text(stringResource(R.string.settings_apply_bluetooth))
                 }
             }
         }
 
         // ===== Channels =====
         item {
-            ExpandableConfigCard(title = "Channels", icon = Icons.Default.Forum) {
+            ExpandableConfigCard(title = stringResource(R.string.settings_channels), icon = Icons.Default.Forum) {
                 if (channelsState.isEmpty()) {
-                    Text("No channels received yet", style = MaterialTheme.typography.bodyMedium)
+                    Text(stringResource(R.string.settings_no_channels), style = MaterialTheme.typography.bodyMedium)
                 }
                 channelsState.forEach { ch ->
                     Card(
@@ -375,7 +377,7 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
 
         // ===== Voice Config =====
         item {
-            ExpandableConfigCard(title = "Voice", icon = Icons.Default.Mic) {
+            ExpandableConfigCard(title = stringResource(R.string.settings_voice), icon = Icons.Default.Mic) {
                 EnumDropdownSetting(
                     label = "AMR-NB Bitrate",
                     options = AmrNbBitrate.entries.map { it.label },
@@ -405,9 +407,9 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
 
         // ===== Device Actions =====
         item {
-            ExpandableConfigCard(title = "Device Actions", icon = Icons.Default.Warning) {
+            ExpandableConfigCard(title = stringResource(R.string.settings_device_actions), icon = Icons.Default.Warning) {
                 OutlinedButton(onClick = { viewModel.rebootDevice() }, modifier = Modifier.fillMaxWidth()) {
-                    Text("Reboot Device")
+                    Text(stringResource(R.string.settings_reboot))
                 }
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
@@ -415,7 +417,7 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
                 ) {
-                    Text("Factory Reset")
+                    Text(stringResource(R.string.settings_factory_reset))
                 }
             }
         }
@@ -443,10 +445,10 @@ private fun ExpandableConfigCard(
                 Icon(icon, contentDescription = null, modifier = Modifier.size(24.dp))
                 Spacer(Modifier.width(12.dp))
                 Text(title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                Icon(
-                    if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
-                    contentDescription = if (expanded) "Collapse" else "Expand"
-                )
+                    Icon(
+                        if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                        contentDescription = if (expanded) stringResource(R.string.settings_collapse) else stringResource(R.string.settings_expand)
+                    )
             }
             AnimatedVisibility(visible = expanded) {
                 Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 16.dp)) {
@@ -530,7 +532,7 @@ private fun SecretFieldSetting(label: String, value: String, onValueChange: (Str
             IconButton(onClick = { visible = !visible }) {
                 Icon(
                     if (visible) Icons.Default.VisibilityOff else Icons.Default.Visibility,
-                    contentDescription = if (visible) "Hide" else "Show"
+                    contentDescription = if (visible) stringResource(R.string.settings_hide) else stringResource(R.string.settings_show)
                 )
             }
         }
