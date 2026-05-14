@@ -1,3 +1,91 @@
 <resources>
     <string name="app_name">Voicetastic</string>
+
+    <!-- Chat Screen -->
+    <string name="chat_status_connected">Mesh: %s</string>
+    <string name="chat_select_channel">Select channel</string>
+    <string name="chat_channel_label">Ch %d</string>
+    <string name="chat_select_node">Select node</string>
+    <string name="chat_broadcast">Broadcast</string>
+    <string name="chat_sending_voice">Sending voice message\u2026 %d%%</string>
+    <string name="chat_cancel">Cancel</string>
+    <string name="chat_recording">Recording\u2026</string>
+    <string name="chat_send">Send</string>
+    <string name="chat_input_placeholder">Type a message\u2026</string>
+    <string name="chat_record_voice">Record voice message</string>
+    <string name="chat_stop">Stop</string>
+    <string name="chat_play">Play</string>
+    <string name="chat_voice_label">Voice \u00b7 %dKB</string>
+    <string name="chat_voice_incomplete">(%d/%d)</string>
+    <string name="chat_incomplete">Incomplete</string>
+    <string name="chat_send_to_title">Send to</string>
+    <string name="chat_broadcast_all">Broadcast (all nodes)</string>
+    <string name="chat_select_channel_title">Select Channel</string>
+    <string name="chat_channel_entry">Channel %d</string>
+
+    <!-- Device Screen -->
+    <string name="device_connected">Connected to Meshtastic</string>
+    <string name="device_connecting">Connecting\u2026</string>
+    <string name="device_not_connected">Not connected</string>
+    <string name="device_my_id">My ID: %s</string>
+    <string name="device_transport">Transport: %s</string>
+    <string name="device_nodes_count">%d nodes discovered</string>
+    <string name="device_disconnect">Disconnect</string>
+    <string name="device_available_title">Available Devices</string>
+    <string name="device_stop">Stop</string>
+    <string name="device_scan">Scan</string>
+    <string name="device_no_devices">No devices found.\nPlug in a Meshtastic node via USB,\nor tap Scan to look for Bluetooth devices.</string>
+    <string name="device_mesh_nodes">Mesh Nodes</string>
+    <string name="device_connect">Connect</string>
+
+    <!-- Settings Screen -->
+    <string name="settings_status_format">Meshtastic: %s</string>
+    <string name="settings_node_id">Node: %s</string>
+    <string name="settings_firmware">Firmware: %s</string>
+    <string name="settings_refresh_config">Refresh config</string>
+    <string name="settings_dismiss">Dismiss</string>
+    <string name="settings_user_owner">User / Owner</string>
+    <string name="settings_long_name">Long Name</string>
+    <string name="settings_short_name">Short Name (max 4)</string>
+    <string name="settings_licensed">Licensed (HAM)</string>
+    <string name="settings_apply_owner">Apply Owner</string>
+    <string name="settings_lora_radio">LoRa / Radio</string>
+    <string name="settings_region">Region</string>
+    <string name="settings_use_preset">Use Preset</string>
+    <string name="settings_modem_preset">Modem Preset</string>
+    <string name="settings_bandwidth">Bandwidth (kHz)</string>
+    <string name="settings_spread_factor">Spread Factor</string>
+    <string name="settings_coding_rate">Coding Rate</string>
+    <string name="settings_hop_limit">Hop Limit (1\u20137)</string>
+    <string name="settings_tx_power">Tx Power (dBm)</string>
+    <string name="settings_tx_enabled">Tx Enabled</string>
+    <string name="settings_device">Device</string>
+    <string name="settings_role">Role</string>
+    <string name="settings_position">Position</string>
+    <string name="settings_power">Power</string>
+    <string name="settings_network">Network</string>
+    <string name="settings_display">Display</string>
+    <string name="settings_bluetooth">Bluetooth</string>
+    <string name="settings_channels">Channels</string>
+    <string name="settings_voice">Voice</string>
+    <string name="settings_device_actions">Device Actions</string>
+    <string name="settings_reboot">Reboot Device</string>
+    <string name="settings_factory_reset">Factory Reset</string>
+    <string name="settings_apply_lora">Apply LoRa Config</string>
+    <string name="settings_apply_device">Apply Device Config</string>
+    <string name="settings_apply_position">Apply Position Config</string>
+    <string name="settings_apply_power">Apply Power Config</string>
+    <string name="settings_apply_network">Apply Network Config</string>
+    <string name="settings_apply_display">Apply Display Config</string>
+    <string name="settings_apply_bluetooth">Apply Bluetooth Config</string>
+    <string name="settings_no_channels">No channels received yet</string>
+    <string name="settings_expand">Expand</string>
+    <string name="settings_collapse">Collapse</string>
+    <string name="settings_hide">Hide</string>
+    <string name="settings_show">Show</string>
+
+    <!-- Navigation -->
+    <string name="nav_devices">Devices</string>
+    <string name="nav_chat">Chat</string>
+    <string name="nav_settings">Settings</string>
 </resources>

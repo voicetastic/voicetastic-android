@@ -13,8 +13,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.hoho.android.usbserial.driver.UsbSerialDriver
+import re.chasam.voicetastic.R
 import re.chasam.voicetastic.service.MeshServiceManager
 
 /**
@@ -69,27 +71,27 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
             Column(modifier = Modifier.padding(16.dp)) {
                 Text(
                     text = when (connectionState) {
-                        "CONNECTED" -> "✅ Connected to Meshtastic"
-                        "CONNECTING" -> "🔄 Connecting…"
-                        else -> "❌ Not connected"
+                        "CONNECTED" -> stringResource(R.string.device_connected)
+                        "CONNECTING" -> stringResource(R.string.device_connecting)
+                        else -> stringResource(R.string.device_not_connected)
                     },
                     style = MaterialTheme.typography.titleMedium
                 )
                 if (connectionState == "CONNECTED") {
-                    myNodeId?.let { Text("My ID: $it", style = MaterialTheme.typography.bodySmall) }
+                    myNodeId?.let { Text(stringResource(R.string.device_my_id, it), style = MaterialTheme.typography.bodySmall) }
                     Text(
-                        "Transport: ${activeTransport.name}",
+                        stringResource(R.string.device_transport, activeTransport.name),
                         style = MaterialTheme.typography.bodySmall
                     )
                     Text(
-                        "${nodes.size} nodes discovered",
+                        stringResource(R.string.device_nodes_count, nodes.size),
                         style = MaterialTheme.typography.bodySmall
                     )
                     Spacer(Modifier.height(8.dp))
                     OutlinedButton(onClick = { meshServiceManager.disconnect() }) {
                         Icon(Icons.Default.LinkOff, contentDescription = null)
                         Spacer(Modifier.width(8.dp))
-                        Text("Disconnect")
+                        Text(stringResource(R.string.device_disconnect))
                     }
                 }
             }
@@ -104,23 +106,22 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Text(
-                    "Available Devices",
+                    stringResource(R.string.device_available_title),
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.weight(1f)
                 )
                 if (isScanning) {
                     CircularProgressIndicator(modifier = Modifier.size(24.dp))
                     Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = { meshServiceManager.stopScan() }) { Text("Stop") }
+                    TextButton(onClick = { meshServiceManager.stopScan() }) { Text(stringResource(R.string.device_stop)) }
                 } else {
                     FilledTonalButton(onClick = {
-                        // Refresh both transports in one click.
                         usbDrivers = meshServiceManager.discoverUsbDevices()
                         meshServiceManager.startScan()
                     }) {
                         Icon(Icons.Default.Search, contentDescription = null)
                         Spacer(Modifier.width(4.dp))
-                        Text("Scan")
+                        Text(stringResource(R.string.device_scan))
                     }
                 }
             }
@@ -135,9 +136,7 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        "No devices found.\n" +
-                            "Plug in a Meshtastic node via USB,\n" +
-                            "or tap Scan to look for Bluetooth devices.",
+                        stringResource(R.string.device_no_devices),
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -157,7 +156,7 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
         // ===== Mesh nodes (after connection) =====
         if (connectionState == "CONNECTED" && nodes.isNotEmpty()) {
             Spacer(Modifier.height(16.dp))
-            Text("Mesh Nodes", style = MaterialTheme.typography.titleMedium)
+            Text(stringResource(R.string.device_mesh_nodes), style = MaterialTheme.typography.titleMedium)
             Spacer(Modifier.height(8.dp))
             LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 items(nodes) { node ->
@@ -258,7 +257,7 @@ private fun UnifiedDeviceCard(entry: DeviceEntry, onClick: () -> Unit) {
                 )
             }
             Spacer(Modifier.width(8.dp))
-            Icon(Icons.Default.ChevronRight, contentDescription = "Connect")
+            Icon(Icons.Default.ChevronRight, contentDescription = stringResource(R.string.device_connect))
         }
     }
 }

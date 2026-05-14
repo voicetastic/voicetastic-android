@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -243,6 +244,7 @@ class MessagingViewModel(
     private fun startTickLoop() {
         tickJob = viewModelScope.launch {
             while (true) {
+                ensureActive()
                 kotlinx.coroutines.delay(TICK_INTERVAL_MS)
                 val out = try {
                     assembler.tick()
