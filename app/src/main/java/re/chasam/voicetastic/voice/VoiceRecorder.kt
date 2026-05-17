@@ -80,7 +80,7 @@ class VoiceRecorder(private val context: Context) {
                 setOutputFormat(MediaRecorder.OutputFormat.OGG)
                 setAudioEncoder(MediaRecorder.AudioEncoder.OPUS)
                 setAudioEncodingBitRate(config.opusBitrateKbps * 1000)
-                setAudioSamplingRate(48000)
+                setAudioSamplingRate(8000)
                 setMaxDuration(config.maxDurationSeconds * 1000)
                 setOutputFile(file.absolutePath)
                 setOnInfoListener { _, what, _ ->
@@ -93,7 +93,7 @@ class VoiceRecorder(private val context: Context) {
                 start()
             }
             isRecording = true
-            Log.i(TAG, "Recording started: Opus ${config.opusBitrateKbps} kbps, max ${config.maxDurationSeconds}s")
+            Log.i(TAG, "Recording started: Opus narrowband ${config.opusBitrateKbps} kbps, max ${config.maxDurationSeconds}s")
             return file
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start Opus recording", e)
