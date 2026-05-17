@@ -5,10 +5,11 @@ import android.media.MediaRecorder
 import android.os.Build
 import android.util.Log
 import re.chasam.voicetastic.model.VoiceConfig
+import re.chasam.voicetastic.model.VoiceCodecChoice
 import java.io.File
 
 /**
- * Records audio in AMR-NB format with configurable bitrate and max duration.
+ * Records audio in AMR-NB or Opus format with configurable bitrate and max duration.
  */
 class VoiceRecorder(private val context: Context) {
 
@@ -21,8 +22,8 @@ class VoiceRecorder(private val context: Context) {
     private var isRecording = false
 
     /**
-     * Start recording audio in AMR-NB format.
-     * @param config voice configuration (bitrate, max duration)
+     * Start recording audio (AMR-NB or Opus depending on config).
+     * @param config voice configuration (codec, bitrate, max duration)
      * @return the output file where audio will be saved, or null on failure
      */
     fun startRecording(config: VoiceConfig): File? {
@@ -31,6 +32,13 @@ class VoiceRecorder(private val context: Context) {
             return outputFile
         }
 
+        return when (config.codec) {
+            VoiceCodecChoice.AmrNb -> startRecordingAmrNb(config)
+            VoiceCodecChoice.Opus -> startRecordingOpus(config)
+        }
+    }
+
+    private fun startRecordingAmrNb(config: VoiceConfig): File? {
         val file = File(context.cacheDir, "voice_${System.currentTimeMillis()}.amr")
         outputFile = file
 
@@ -40,7 +48,7 @@ class VoiceRecorder(private val context: Context) {
                 setOutputFormat(MediaRecorder.OutputFormat.AMR_NB)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AMR_NB)
                 setAudioEncodingBitRate(config.bitrate.bps)
-                setAudioSamplingRate(8000) // AMR-NB always uses 8kHz
+                setAudioSamplingRate(8000)
                 setMaxDuration(config.maxDurationSeconds * 1000)
                 setOutputFile(file.absolutePath)
                 setOnInfoListener { _, what, _ ->
@@ -53,10 +61,42 @@ class VoiceRecorder(private val context: Context) {
                 start()
             }
             isRecording = true
-            Log.i(TAG, "Recording started: ${config.bitrate.label}, max ${config.maxDurationSeconds}s")
+            Log.i(TAG, "Recording started: AMR-NB ${config.bitrate.label}, max ${config.maxDurationSeconds}s")
             return file
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start recording", e)
+            Log.e(TAG, "Failed to start AMR-NB recording", e)
+            cleanup()
+            return null
+        }
+    }
+
+    private fun startRecordingOpus(config: VoiceConfig): File? {
+        val file = File(context.cacheDir, "voice_${System.currentTimeMillis()}.ogg")
+        outputFile = file
+
+        try {
+            recorder = createMediaRecorder().apply {
+                setAudioSource(MediaRecorder.AudioSource.MIC)
+                setOutputFormat(MediaRecorder.OutputFormat.OGG)
+                setAudioEncoder(MediaRecorder.AudioEncoder.OPUS)
+                setAudioEncodingBitRate(config.opusBitrateKbps * 1000)
+                setAudioSamplingRate(8000)
+                setMaxDuration(config.maxDurationSeconds * 1000)
+                setOutputFile(file.absolutePath)
+                setOnInfoListener { _, what, _ ->
+                    if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) {
+                        Log.i(TAG, "Max duration reached, stopping recording")
+                        stopRecording()
+                    }
+                }
+                prepare()
+                start()
+            }
+            isRecording = true
+            Log.i(TAG, "Recording started: Opus narrowband ${config.opusBitrateKbps} kbps, max ${config.maxDurationSeconds}s")
+            return file
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start Opus recording", e)
             cleanup()
             return null
         }
