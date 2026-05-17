@@ -18,6 +18,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import re.chasam.voicetastic.R
 import re.chasam.voicetastic.model.AmrNbBitrate
+import re.chasam.voicetastic.model.VoiceCodecChoice
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -379,14 +380,47 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
         item {
             ExpandableConfigCard(title = stringResource(R.string.settings_voice), icon = Icons.Default.Mic) {
                 EnumDropdownSetting(
-                    label = "AMR-NB Bitrate",
-                    options = AmrNbBitrate.entries.map { it.label },
-                    selected = voiceConfig.bitrate.label,
+                    label = "Codec",
+                    options = listOf("AMR-NB", "Opus"),
+                    selected = when (voiceConfig.codec) {
+                        VoiceCodecChoice.AmrNb -> "AMR-NB"
+                        VoiceCodecChoice.Opus -> "Opus"
+                    },
                     onSelected = { label ->
-                        AmrNbBitrate.entries.find { it.label == label }?.let { viewModel.setVoiceBitrate(it) }
+                        val codec = when (label) {
+                            "Opus" -> VoiceCodecChoice.Opus
+                            else -> VoiceCodecChoice.AmrNb
+                        }
+                        viewModel.setVoiceCodec(codec)
                     }
                 )
                 Spacer(Modifier.height(8.dp))
+
+                // AMR-NB settings
+                if (voiceConfig.codec == VoiceCodecChoice.AmrNb) {
+                    EnumDropdownSetting(
+                        label = "AMR-NB Bitrate",
+                        options = AmrNbBitrate.entries.map { it.label },
+                        selected = voiceConfig.bitrate.label,
+                        onSelected = { label ->
+                            AmrNbBitrate.entries.find { it.label == label }?.let { viewModel.setVoiceBitrate(it) }
+                        }
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+
+                // Opus settings
+                if (voiceConfig.codec == VoiceCodecChoice.Opus) {
+                    Text("Opus Bitrate: ${voiceConfig.opusBitrateKbps} kbps")
+                    Slider(
+                        value = voiceConfig.opusBitrateKbps.toFloat(),
+                        onValueChange = { viewModel.setOpusBitrateKbps(it.toInt()) },
+                        valueRange = 6f..16f,
+                        steps = 9
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+
                 Text("Max Recording Duration: ${voiceConfig.maxDurationSeconds}s")
                 Slider(
                     value = voiceConfig.maxDurationSeconds.toFloat(),
