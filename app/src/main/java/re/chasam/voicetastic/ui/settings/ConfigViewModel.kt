@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import re.chasam.voicetastic.model.AmrNbBitrate
+import re.chasam.voicetastic.model.VoiceCodecChoice
 import re.chasam.voicetastic.model.VoiceConfig
 import re.chasam.voicetastic.service.MeshServiceManager
 
@@ -543,8 +544,14 @@ class ConfigViewModel(
     }
 
     // --- Voice ---
+    fun setVoiceCodec(codec: VoiceCodecChoice) {
+        voiceConfig.value = voiceConfig.value.copy(codec = codec)
+    }
     fun setVoiceBitrate(bitrate: AmrNbBitrate) {
         voiceConfig.value = voiceConfig.value.copy(bitrate = bitrate)
+    }
+    fun setOpusBitrateKbps(bitrate: Int) {
+        voiceConfig.value = voiceConfig.value.copy(opusBitrateKbps = bitrate.coerceIn(6, 16))
     }
     fun setMaxDuration(seconds: Int) {
         voiceConfig.value = voiceConfig.value.copy(maxDurationSeconds = seconds.coerceIn(1, 60))

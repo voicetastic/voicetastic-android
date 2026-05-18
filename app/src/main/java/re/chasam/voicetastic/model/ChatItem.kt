@@ -1,5 +1,7 @@
 package re.chasam.voicetastic.model
 
+import uniffi.voicetastic.VoiceCodec
+
 /**
  * Unified chat item representing either a text or voice message.
  *
@@ -38,6 +40,7 @@ sealed class ChatItem {
         override val timestamp: Long = System.currentTimeMillis(),
         override val isOutgoing: Boolean = false,
         val audioData: ByteArray,
+        val codec: VoiceCodec = VoiceCodec.AmrNb,
         val isComplete: Boolean = true,
         val totalChunks: Int = 0,
         val receivedChunks: Int = 0,

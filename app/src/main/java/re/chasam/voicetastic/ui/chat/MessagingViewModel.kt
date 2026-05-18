@@ -22,6 +22,7 @@ import re.chasam.voicetastic.core.NodeIds
 import re.chasam.voicetastic.model.ChatItem
 import re.chasam.voicetastic.model.MeshNode
 import re.chasam.voicetastic.model.VoiceConfig
+import re.chasam.voicetastic.model.VoiceCodecChoice
 import re.chasam.voicetastic.service.MeshServiceManager
 import re.chasam.voicetastic.service.Portnums
 import re.chasam.voicetastic.voice.VoicePlayer
@@ -67,7 +68,7 @@ class MessagingViewModel(
         private const val COMPLETION_MEMORY_MS: ULong = 600_000uL
 
         /** Hard cap on NACK rounds per message. Mirrors `NACK_MAX_ROUNDS`. */
-        private const val MAX_NACK_ROUNDS: UByte = 32u
+        private const val MAX_NACK_ROUNDS: UShort = 32u
     }
 
     // Master list of ALL chat items (unfiltered)
@@ -282,6 +283,7 @@ class MessagingViewModel(
             from = from,
             to = toStr,
             audioData = audio,
+            codec = codec,
             timestamp = timestampMs,
             isOutgoing = false,
             isComplete = isComplete,
@@ -368,14 +370,19 @@ class MessagingViewModel(
         val myId = meshService.myNodeId.value ?: "me"
         val fromNodeNum = NodeIds.nodeIdToNum(myId)?.toUInt() ?: 0u
 
+        val (voiceCodec, codecParam) = when (cfg.codec) {
+            VoiceCodecChoice.AmrNb -> VoiceCodec.AmrNb to cfg.bitrate.ordinal.toUByte()
+            VoiceCodecChoice.Opus -> VoiceCodec.Opus to cfg.opusBitrateKbps.toUByte()
+        }
+
         val build = try {
             buildMessage(
                 audio = audioData,
                 cfg = BuildConfig(
                     messageId = randomMessageId(),
                     streamSeq = 0u,
-                    codec = VoiceCodec.AmrNb,
-                    codecParam = cfg.bitrate.ordinal.toUByte(),
+                    codec = voiceCodec,
+                    codecParam = codecParam,
                     chunkSize = DEFAULT_CHUNK_SIZE,
                     parityCount = DEFAULT_PARITY_COUNT,
                     lastInStream = true,
@@ -412,6 +419,7 @@ class MessagingViewModel(
             from = myId,
             to = toField,
             audioData = audioData,
+            codec = voiceCodec,
             isOutgoing = true,
             isComplete = true,
             totalChunks = build.totalData.toInt(),
@@ -438,7 +446,7 @@ class MessagingViewModel(
 
         _isPlaying.value = true
         _playingItemId.value = item.id
-        player.play(item.audioData, context.cacheDir)
+        player.play(item.audioData, context.cacheDir, item.codec)
     }
 
     /**
