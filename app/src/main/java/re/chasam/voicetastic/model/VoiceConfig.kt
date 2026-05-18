@@ -1,14 +1,25 @@
 package re.chasam.voicetastic.model
 
 /**
+ * Voice codec choice for recording.
+ */
+enum class VoiceCodecChoice {
+    AmrNb, Opus
+}
+
+/**
  * Configuration for voice messages.
  *
- * @param bitrate AMR-NB bitrate (use MediaRecorder.AudioEncoder AMR_NB bitrate values)
+ * @param codec Codec to use (AMR-NB or Opus)
+ * @param bitrate AMR-NB bitrate (use MediaRecorder.AudioEncoder AMR_NB bitrate values); used when codec=AmrNb
+ * @param opusBitrateKbps Opus encoder bitrate in kbps (6–16 range); used when codec=Opus
  * @param maxDurationSeconds Maximum recording duration in seconds (1–60)
  * @param chunkTimeoutSeconds Timeout for receiving all chunks of a voice message
  */
 data class VoiceConfig(
+    val codec: VoiceCodecChoice = VoiceCodecChoice.AmrNb,
     val bitrate: AmrNbBitrate = AmrNbBitrate.MR795,
+    val opusBitrateKbps: Int = 12,
     val maxDurationSeconds: Int = 20,
     val chunkTimeoutSeconds: Int = 30,
     val partialPlayOnTimeout: Boolean = true

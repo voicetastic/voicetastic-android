@@ -2,11 +2,12 @@ package re.chasam.voicetastic.voice
 
 import android.media.MediaPlayer
 import android.util.Log
+import uniffi.voicetastic.VoiceCodec
 import java.io.File
 import java.io.FileOutputStream
 
 /**
- * Plays back AMR-NB audio data from byte arrays or files.
+ * Plays back audio data (AMR-NB or Opus) from byte arrays or files.
  */
 class VoicePlayer {
 
@@ -23,18 +24,22 @@ class VoicePlayer {
     var onCompletion: (() -> Unit)? = null
 
     /**
-     * Play AMR-NB audio from a byte array.
+     * Play audio from a byte array.
      * Writes to a temporary file and plays via MediaPlayer.
      *
-     * @param audioData AMR-NB file bytes (must include AMR header)
+     * @param audioData codec-encoded file bytes (AMR with header, OGG for Opus, etc.)
      * @param cacheDir directory for temporary file storage
+     * @param codec the codec used for encoding (determines temp file extension)
      */
-    fun play(audioData: ByteArray, cacheDir: File) {
+    fun play(audioData: ByteArray, cacheDir: File, codec: VoiceCodec) {
         stop()
 
         try {
-            // Write audio data to temp file
-            val file = File(cacheDir, "playback_${System.currentTimeMillis()}.amr")
+            val extension = when (codec) {
+                VoiceCodec.Opus -> "ogg"
+                else -> "amr"
+            }
+            val file = File(cacheDir, "playback_${System.currentTimeMillis()}.$extension")
             FileOutputStream(file).use { it.write(audioData) }
             tempFile = file
 
@@ -56,7 +61,7 @@ class VoicePlayer {
             player.start()
             mediaPlayer = player
             isPlaying = true
-            Log.i(TAG, "Playback started: ${audioData.size} bytes")
+            Log.i(TAG, "Playback started ($codec): ${audioData.size} bytes")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to play audio", e)
             cleanup()
