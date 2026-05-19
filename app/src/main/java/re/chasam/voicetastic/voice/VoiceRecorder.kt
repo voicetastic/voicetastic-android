@@ -1,28 +1,52 @@
 package re.chasam.voicetastic.voice
 
+import android.annotation.SuppressLint
 import android.content.Context
+import android.media.AudioFormat
+import android.media.AudioRecord
 import android.media.MediaRecorder
 import android.os.Build
 import android.util.Log
 import re.chasam.voicetastic.model.VoiceConfig
 import re.chasam.voicetastic.model.VoiceCodecChoice
+import uniffi.voicetastic.Codec2Encoder
 import java.io.File
+import java.io.FileOutputStream
+import kotlin.concurrent.thread
 
 /**
- * Records audio in AMR-NB or Opus format with configurable bitrate and max duration.
+ * Records audio in AMR-NB, Opus, or Codec2 format.
+ *
+ * AMR-NB and Opus use Android's `MediaRecorder` (container files); Codec2
+ * captures raw PCM via [AudioRecord] and feeds it through the Rust
+ * [Codec2Encoder] one frame at a time, writing packed Codec2 bytes to disk.
  */
 class VoiceRecorder(private val context: Context) {
 
     companion object {
         private const val TAG = "VoiceRecorder"
+        /** Codec2 always operates on 8 kHz mono 16-bit PCM. */
+        private const val CODEC2_SAMPLE_RATE = 8000
     }
 
     private var recorder: MediaRecorder? = null
     private var outputFile: File? = null
     private var isRecording = false
 
+    // Codec2 path state — only one of (recorder, codec2State) is live at once.
+    private var codec2State: Codec2RecordingState? = null
+
+    private class Codec2RecordingState(
+        val audioRecord: AudioRecord,
+        val encoder: Codec2Encoder,
+        val output: FileOutputStream,
+        val file: File,
+        @Volatile var keepRunning: Boolean = true,
+        var workerThread: Thread? = null,
+    )
+
     /**
-     * Start recording audio (AMR-NB or Opus depending on config).
+     * Start recording audio (AMR-NB, Opus, or Codec2 depending on config).
      * @param config voice configuration (codec, bitrate, max duration)
      * @return the output file where audio will be saved, or null on failure
      */
@@ -35,6 +59,7 @@ class VoiceRecorder(private val context: Context) {
         return when (config.codec) {
             VoiceCodecChoice.AmrNb -> startRecordingAmrNb(config)
             VoiceCodecChoice.Opus -> startRecordingOpus(config)
+            VoiceCodecChoice.Codec2 -> startRecordingCodec2(config)
         }
     }
 
@@ -68,6 +93,117 @@ class VoiceRecorder(private val context: Context) {
             cleanup()
             return null
         }
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startRecordingCodec2(config: VoiceConfig): File? {
+        val mode = config.codec2Mode
+        val file = File(context.cacheDir, "voice_${System.currentTimeMillis()}.c2")
+        outputFile = file
+
+        // AudioRecord buffer: pick the larger of the framework minimum and the
+        // codec's frame size — we read in whole-frame chunks so the encoder
+        // never sees a partial frame.
+        val minBuf = AudioRecord.getMinBufferSize(
+            CODEC2_SAMPLE_RATE,
+            AudioFormat.CHANNEL_IN_MONO,
+            AudioFormat.ENCODING_PCM_16BIT,
+        )
+        if (minBuf <= 0) {
+            Log.e(TAG, "Codec2: AudioRecord.getMinBufferSize returned $minBuf")
+            return null
+        }
+        val frameSamples = mode.samplesPerFrame
+        // Use a multi-frame buffer so reads are efficient. Round up.
+        val framesPerRead = maxOf(1, minBuf / 2 / frameSamples)
+        val samplesPerRead = framesPerRead * frameSamples
+        val bytesPerRead = samplesPerRead * 2 // i16 = 2 bytes
+        val audioRecordBufSize = maxOf(minBuf, bytesPerRead * 4)
+
+        val audioRecord = try {
+            AudioRecord(
+                MediaRecorder.AudioSource.MIC,
+                CODEC2_SAMPLE_RATE,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                audioRecordBufSize,
+            )
+        } catch (e: Exception) {
+            Log.e(TAG, "Codec2: AudioRecord construction failed", e)
+            return null
+        }
+        if (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
+            Log.e(TAG, "Codec2: AudioRecord uninitialized (state=${audioRecord.state})")
+            audioRecord.release()
+            return null
+        }
+
+        val encoder = try {
+            Codec2Encoder(mode.ordinal.toUByte())
+        } catch (e: Exception) {
+            Log.e(TAG, "Codec2: encoder construction failed", e)
+            audioRecord.release()
+            return null
+        }
+
+        val out = try {
+            FileOutputStream(file)
+        } catch (e: Exception) {
+            Log.e(TAG, "Codec2: cannot open output file", e)
+            audioRecord.release()
+            encoder.close()
+            return null
+        }
+
+        val state = Codec2RecordingState(audioRecord, encoder, out, file)
+        codec2State = state
+
+        try {
+            audioRecord.startRecording()
+        } catch (e: Exception) {
+            Log.e(TAG, "Codec2: AudioRecord.startRecording failed", e)
+            codec2State = null
+            out.close()
+            audioRecord.release()
+            encoder.close()
+            return null
+        }
+
+        isRecording = true
+
+        // Worker thread: read PCM in whole-frame chunks, encode, write to file.
+        // Self-terminates on max duration so the user doesn't have to poll.
+        val maxDurationMs = config.maxDurationSeconds * 1000L
+        state.workerThread = thread(name = "Codec2RecorderWorker", start = true) {
+            val pcmBuf = ShortArray(samplesPerRead)
+            val startMs = System.currentTimeMillis()
+            while (state.keepRunning) {
+                val read = audioRecord.read(pcmBuf, 0, samplesPerRead, AudioRecord.READ_BLOCKING)
+                if (read <= 0) {
+                    if (read != 0) Log.w(TAG, "Codec2: AudioRecord.read returned $read")
+                    break
+                }
+                // Trim to whole frames. AudioRecord may short-read, drop the tail.
+                val wholeFrames = read / frameSamples
+                if (wholeFrames == 0) continue
+                val usable = wholeFrames * frameSamples
+                val pcmList = pcmBuf.copyOf(usable).asList()
+                try {
+                    val encoded = encoder.encode(pcmList)
+                    out.write(encoded)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Codec2: encode/write failed", e)
+                    break
+                }
+                if (System.currentTimeMillis() - startMs >= maxDurationMs) {
+                    Log.i(TAG, "Codec2: max duration reached")
+                    break
+                }
+            }
+        }
+
+        Log.i(TAG, "Recording started: Codec2 ${mode.label}, max ${config.maxDurationSeconds}s")
+        return file
     }
 
     private fun startRecordingOpus(config: VoiceConfig): File? {
@@ -104,10 +240,31 @@ class VoiceRecorder(private val context: Context) {
 
     /**
      * Stop recording and return the recorded audio file.
-     * @return the recorded AMR-NB file, or null if not recording
+     * @return the recorded audio file, or null if not recording
      */
     fun stopRecording(): File? {
         if (!isRecording) return null
+
+        // Codec2 path: signal worker to stop, join, drain, then release.
+        codec2State?.let { state ->
+            state.keepRunning = false
+            try {
+                state.workerThread?.join(1000)
+            } catch (_: InterruptedException) {}
+            try {
+                state.audioRecord.stop()
+            } catch (_: Exception) {}
+            state.audioRecord.release()
+            try {
+                state.output.flush()
+                state.output.close()
+            } catch (_: Exception) {}
+            state.encoder.close()
+            codec2State = null
+            isRecording = false
+            Log.i(TAG, "Recording stopped (Codec2): ${state.file.length()} bytes")
+            return state.file
+        }
 
         return try {
             recorder?.stop()
@@ -130,6 +287,13 @@ class VoiceRecorder(private val context: Context) {
             recorder?.release()
         } catch (_: Exception) {}
         recorder = null
+        codec2State?.let { state ->
+            state.keepRunning = false
+            try { state.audioRecord.release() } catch (_: Exception) {}
+            try { state.output.close() } catch (_: Exception) {}
+            try { state.encoder.close() } catch (_: Exception) {}
+        }
+        codec2State = null
         isRecording = false
     }
 
