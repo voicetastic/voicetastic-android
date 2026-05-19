@@ -154,22 +154,44 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
         }
 
         // ===== Mesh nodes (after connection) =====
-        if (connectionState == "CONNECTED" && nodes.isNotEmpty()) {
+        if (connectionState == "CONNECTED") {
             Spacer(Modifier.height(16.dp))
-            Text(stringResource(R.string.device_mesh_nodes), style = MaterialTheme.typography.titleMedium)
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    stringResource(R.string.device_mesh_nodes),
+                    style = MaterialTheme.typography.titleMedium,
+                    modifier = Modifier.weight(1f)
+                )
+                FilledTonalButton(onClick = { meshServiceManager.requestNodeInfo() }) {
+                    Icon(Icons.Default.Refresh, contentDescription = null)
+                    Spacer(Modifier.width(4.dp))
+                    Text(stringResource(R.string.device_scan_nodes))
+                }
+            }
             Spacer(Modifier.height(8.dp))
-            LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                items(nodes) { node ->
-                    ListItem(
-                        headlineContent = { Text(node.longName) },
-                        supportingContent = { Text(node.nodeId) },
-                        leadingContent = {
-                            Text(node.shortName, style = MaterialTheme.typography.titleMedium)
-                        },
-                        trailingContent = {
-                            node.batteryLevel?.let { Text("🔋$it%") }
-                        }
-                    )
+            if (nodes.isEmpty()) {
+                Text(
+                    stringResource(R.string.device_no_nodes),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            } else {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    items(nodes) { node ->
+                        ListItem(
+                            headlineContent = { Text(node.longName) },
+                            supportingContent = { Text(node.nodeId) },
+                            leadingContent = {
+                                Text(node.shortName, style = MaterialTheme.typography.titleMedium)
+                            },
+                            trailingContent = {
+                                node.batteryLevel?.let { Text("🔋$it%") }
+                            }
+                        )
+                    }
                 }
             }
         }
