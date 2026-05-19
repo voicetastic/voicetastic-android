@@ -177,6 +177,18 @@ class MessagingViewModel(
     private fun observeIncomingTextMessages() {
         viewModelScope.launch {
             meshService.incomingTextMessages.collect { incoming ->
+                val contactKey = computeContactKey(incoming.from, incoming.to, isOutgoing = false)
+                val myId = meshService.myNodeId.value
+                val selected = _selectedNode.value?.nodeId
+                val selectedChan = _selectedChannel.value
+                val willShow = incoming.channel == selectedChan &&
+                    contactKey == (selected ?: "broadcast")
+                Log.d(
+                    TAG,
+                    "incoming text: from=${incoming.from} to=${incoming.to} ch=${incoming.channel} " +
+                        "myId=$myId → contactKey=$contactKey | selectedNode=$selected " +
+                        "selectedCh=$selectedChan → willShow=$willShow"
+                )
                 val item = ChatItem.Text(
                     id = ++itemIdCounter,
                     text = incoming.text,
@@ -185,7 +197,7 @@ class MessagingViewModel(
                     timestamp = incoming.timestamp,
                     isOutgoing = false,
                     channel = incoming.channel,
-                    contactKey = computeContactKey(incoming.from, incoming.to, isOutgoing = false)
+                    contactKey = contactKey
                 )
                 _allChatItems.value = _allChatItems.value + item
             }
