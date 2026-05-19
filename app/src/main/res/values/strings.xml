@@ -36,6 +36,8 @@
     <string name="device_scan">Scan</string>
     <string name="device_no_devices">No devices found.\nPlug in a Meshtastic node via USB,\nor tap Scan to look for Bluetooth devices.</string>
     <string name="device_mesh_nodes">Mesh Nodes</string>
+    <string name="device_scan_nodes">Scan Nodes</string>
+    <string name="device_no_nodes">No mesh nodes yet. Tap Scan Nodes to refresh.</string>
     <string name="device_connect">Connect</string>
 
     <!-- Settings Screen -->
