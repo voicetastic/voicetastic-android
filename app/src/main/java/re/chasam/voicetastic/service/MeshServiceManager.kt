@@ -235,8 +235,13 @@ class MeshServiceManager(private val context: Context) {
 
         rustService.setTextListener(object : MeshTextListener {
             override fun onText(message: uniffi.voicetastic.IncomingTextMsg) {
-                val toId = if (message.to.toInt() == MeshtasticBle.BROADCAST_ADDR) "broadcast"
-                else MeshtasticBle.nodeNumToId(message.to.toInt())
+                val toInt = message.to.toInt()
+                val isBroadcast = toInt == MeshtasticBle.BROADCAST_ADDR
+                val toId = if (isBroadcast) "broadcast" else MeshtasticBle.nodeNumToId(toInt)
+                Log.d(
+                    TAG,
+                    "rx text from=${message.fromId} to=$toId (raw=0x${toInt.toUInt().toString(16)}) ch=${message.channel} bytes=${message.text.length}"
+                )
                 _incomingTextMessages.tryEmit(
                     IncomingText(
                         from = message.fromId,
@@ -253,8 +258,13 @@ class MeshServiceManager(private val context: Context) {
             override fun onData(message: uniffi.voicetastic.IncomingDataMsg) {
                 val fromNum = message.from.toInt()
                 val fromId = MeshtasticBle.nodeNumToId(fromNum)
-                val toId = if (message.to.toInt() == MeshtasticBle.BROADCAST_ADDR) "broadcast"
-                else MeshtasticBle.nodeNumToId(message.to.toInt())
+                val toInt = message.to.toInt()
+                val isBroadcast = toInt == MeshtasticBle.BROADCAST_ADDR
+                val toId = if (isBroadcast) "broadcast" else MeshtasticBle.nodeNumToId(toInt)
+                Log.d(
+                    TAG,
+                    "rx data from=$fromId to=$toId (raw=0x${toInt.toUInt().toString(16)}) port=${message.portnum} ch=${message.channel} len=${message.payload.size}"
+                )
 
                 when (message.portnum) {
                     Ports.NODEINFO_APP -> mergeNodeFromUser(fromNum, message.payload, message.rxTime.toLong())
@@ -393,6 +403,31 @@ class MeshServiceManager(private val context: Context) {
             .onFailure { Log.e(TAG, "refreshConfig failed", it) }
     }
 
+    /**
+     * Broadcast our own NodeInfo to nudge peers into announcing themselves.
+     *
+     * Unlike [refreshConfig], this does NOT re-burst the local device's
+     * configuration (and does NOT flip the UI back to `CONNECTING`). It just
+     * sends a single NodeInfo packet on the mesh; nearby nodes typically reply
+     * with their own NodeInfo, which arrives via the existing inbound path.
+     */
+    fun requestNodeInfo(): Boolean {
+        if (!isConnected) return false
+        val user = _owner.value ?: run {
+            Log.w(TAG, "requestNodeInfo: local owner not yet known; skipping")
+            return false
+        }
+        return try {
+            // want_ack = false: broadcast NodeInfo is informational, not addressed.
+            rustService.sendData(Ports.NODEINFO_APP, user.toByteArray(), 0u, null, false)
+            Log.d(TAG, "requestNodeInfo: NodeInfo broadcast sent")
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "requestNodeInfo failed", e)
+            false
+        }
+    }
+
     private fun handleConfig(config: MeshProtos.Config) {
         when {
             config.hasLora() -> {
@@ -445,7 +480,10 @@ class MeshServiceManager(private val context: Context) {
 
         return try {
             val id = rustService.sendText(text, channel.toUInt(), destUInt)
-            Log.d(TAG, "sendText ok (id=$id, dest=${destination ?: "broadcast"}, ch=$channel)")
+            Log.d(
+                TAG,
+                "sendText ok (id=$id, dest=${destination ?: "broadcast"}, destNum=${destUInt?.toString(16)?.let { "0x$it" } ?: "broadcast"}, ch=$channel, bytes=${text.length})"
+            )
             true
         } catch (e: Exception) {
             Log.e(TAG, "sendText failed", e)
