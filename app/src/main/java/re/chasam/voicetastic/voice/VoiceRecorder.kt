@@ -5,6 +5,8 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
 import android.os.Build
 import android.util.Log
 import re.chasam.voicetastic.model.VoiceConfig
@@ -41,6 +43,8 @@ class VoiceRecorder(private val context: Context) {
         val encoder: Codec2Encoder,
         val output: FileOutputStream,
         val file: File,
+        val noiseSuppressor: NoiseSuppressor?,
+        val gainControl: AutomaticGainControl?,
         @Volatile var keepRunning: Boolean = true,
         var workerThread: Thread? = null,
     )
@@ -69,7 +73,11 @@ class VoiceRecorder(private val context: Context) {
 
         try {
             recorder = createMediaRecorder().apply {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
+                // VOICE_COMMUNICATION routes through the OS VoIP capture
+                // pipeline — most devices apply hardware NS / AGC on this
+                // source. Honour the user's noise-suppression preference;
+                // when disabled, fall back to raw MIC.
+                setAudioSource(audioSourceFor(config))
                 setOutputFormat(MediaRecorder.OutputFormat.AMR_NB)
                 setAudioEncoder(MediaRecorder.AudioEncoder.AMR_NB)
                 setAudioEncodingBitRate(config.bitrate.bps)
@@ -122,7 +130,10 @@ class VoiceRecorder(private val context: Context) {
 
         val audioRecord = try {
             AudioRecord(
-                MediaRecorder.AudioSource.MIC,
+                // VOICE_COMMUNICATION engages the OS VoIP capture pipeline
+                // (hardware NS / AGC on most devices). Honour the user's
+                // toggle; when off, capture raw mic.
+                audioSourceFor(config),
                 CODEC2_SAMPLE_RATE,
                 AudioFormat.CHANNEL_IN_MONO,
                 AudioFormat.ENCODING_PCM_16BIT,
@@ -138,10 +149,36 @@ class VoiceRecorder(private val context: Context) {
             return null
         }
 
+        // Belt-and-suspenders: attach NoiseSuppressor and AutomaticGainControl
+        // to the capture session. Only when the user hasn't opted out — if
+        // they want raw audio, we want the effect handles to stay null so
+        // nothing is processed at all. `isAvailable()` guards against
+        // devices that don't expose the effect.
+        val noiseSuppressionOn = config.noiseSuppressionEnabled
+        val sessionId = audioRecord.audioSessionId
+        val noiseSuppressor = if (noiseSuppressionOn && NoiseSuppressor.isAvailable()) {
+            runCatching { NoiseSuppressor.create(sessionId)?.apply { enabled = true } }
+                .onFailure { Log.w(TAG, "Codec2: NoiseSuppressor attach failed", it) }
+                .getOrNull()
+        } else {
+            if (noiseSuppressionOn) Log.d(TAG, "Codec2: NoiseSuppressor not available on this device")
+            null
+        }
+        val gainControl = if (noiseSuppressionOn && AutomaticGainControl.isAvailable()) {
+            runCatching { AutomaticGainControl.create(sessionId)?.apply { enabled = true } }
+                .onFailure { Log.w(TAG, "Codec2: AutomaticGainControl attach failed", it) }
+                .getOrNull()
+        } else {
+            if (noiseSuppressionOn) Log.d(TAG, "Codec2: AutomaticGainControl not available on this device")
+            null
+        }
+
         val encoder = try {
             Codec2Encoder(mode.ordinal.toUByte())
         } catch (e: Exception) {
             Log.e(TAG, "Codec2: encoder construction failed", e)
+            noiseSuppressor?.release()
+            gainControl?.release()
             audioRecord.release()
             return null
         }
@@ -150,12 +187,21 @@ class VoiceRecorder(private val context: Context) {
             FileOutputStream(file)
         } catch (e: Exception) {
             Log.e(TAG, "Codec2: cannot open output file", e)
+            noiseSuppressor?.release()
+            gainControl?.release()
             audioRecord.release()
             encoder.close()
             return null
         }
 
-        val state = Codec2RecordingState(audioRecord, encoder, out, file)
+        val state = Codec2RecordingState(
+            audioRecord = audioRecord,
+            encoder = encoder,
+            output = out,
+            file = file,
+            noiseSuppressor = noiseSuppressor,
+            gainControl = gainControl,
+        )
         codec2State = state
 
         try {
@@ -164,6 +210,8 @@ class VoiceRecorder(private val context: Context) {
             Log.e(TAG, "Codec2: AudioRecord.startRecording failed", e)
             codec2State = null
             out.close()
+            noiseSuppressor?.release()
+            gainControl?.release()
             audioRecord.release()
             encoder.close()
             return null
@@ -212,7 +260,9 @@ class VoiceRecorder(private val context: Context) {
 
         try {
             recorder = createMediaRecorder().apply {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
+                // Same audio source as AMR-NB (VOICE_COMMUNICATION when
+                // noise suppression is on, raw MIC otherwise).
+                setAudioSource(audioSourceFor(config))
                 setOutputFormat(MediaRecorder.OutputFormat.OGG)
                 setAudioEncoder(MediaRecorder.AudioEncoder.OPUS)
                 setAudioEncodingBitRate(config.opusBitrateKbps * 1000)
@@ -254,6 +304,11 @@ class VoiceRecorder(private val context: Context) {
             try {
                 state.audioRecord.stop()
             } catch (_: Exception) {}
+            // Release audiofx effects before the AudioRecord — they hold
+            // references to its session, and releasing AudioRecord first
+            // can race with the effects' internal teardown on some OEMs.
+            try { state.noiseSuppressor?.release() } catch (_: Exception) {}
+            try { state.gainControl?.release() } catch (_: Exception) {}
             state.audioRecord.release()
             try {
                 state.output.flush()
@@ -289,6 +344,8 @@ class VoiceRecorder(private val context: Context) {
         recorder = null
         codec2State?.let { state ->
             state.keepRunning = false
+            try { state.noiseSuppressor?.release() } catch (_: Exception) {}
+            try { state.gainControl?.release() } catch (_: Exception) {}
             try { state.audioRecord.release() } catch (_: Exception) {}
             try { state.output.close() } catch (_: Exception) {}
             try { state.encoder.close() } catch (_: Exception) {}
@@ -296,6 +353,19 @@ class VoiceRecorder(private val context: Context) {
         codec2State = null
         isRecording = false
     }
+
+    /**
+     * Returns the AudioSource to use for capture given the user's noise
+     * suppression preference. `VOICE_COMMUNICATION` engages the OS VoIP
+     * capture pipeline (HAL-level NS / AGC on most devices); `MIC` is
+     * the raw signal.
+     */
+    private fun audioSourceFor(config: VoiceConfig): Int =
+        if (config.noiseSuppressionEnabled) {
+            MediaRecorder.AudioSource.VOICE_COMMUNICATION
+        } else {
+            MediaRecorder.AudioSource.MIC
+        }
 
     @Suppress("DEPRECATION")
     private fun createMediaRecorder(): MediaRecorder {
