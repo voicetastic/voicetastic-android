@@ -140,6 +140,22 @@ class BleMeshTransport(
     @Volatile private var sink: MeshTransportSink? = null
     @Volatile private var setupListener: SetupListener? = null
 
+    /**
+     * Negotiated ATT MTU. Defaults to the BLE minimum (23) so the
+     * `WRITE_NO_RESPONSE` size check is safe even if a write somehow
+     * races onMtuChanged. Updated from [onMtuChanged] on GATT_SUCCESS.
+     *
+     * `WRITE_NO_RESPONSE` is hard-capped at MTU − 3 bytes per write
+     * (1 byte opcode + 2 byte handle = 3 byte ATT overhead). Anything
+     * larger is silently truncated by the controller — the API call
+     * still returns SUCCESS, but the firmware receives a partial
+     * protobuf and rejects it. For voice DATA chunks whose ToRadio
+     * encoding lands around 250-270 bytes that meant chunks > MTU − 3
+     * never made it over LoRa, even though the sender thought they
+     * had.
+     */
+    @Volatile private var negotiatedMtu = 23
+
     private var gatt: BluetoothGatt? = null
     private var toRadioChar: BluetoothGattCharacteristic? = null
     private var fromRadioChar: BluetoothGattCharacteristic? = null
@@ -212,29 +228,39 @@ class BleMeshTransport(
         }
         bleLock.withLock {
             writeSemaphore.drainPermits()
-            // WRITE_TYPE_NO_RESPONSE matches the upstream desktop core's
-            // `WriteType::WithoutResponse` (see
-            // `voicetastic-core/src/ble.rs`). It removes the per-write
-            // GATT ACK round-trip, which on a typical Android stack
-            // costs one full connection interval (~12 ms at HIGH
-            // priority, ~30-50 ms at default). The win compounds on
-            // anything that issues several writes back-to-back: the
-            // initial `WantConfigId` plus the admin-message pulls
-            // (`get_owner`, `get_channel(0..N)`, `get_metadata`) used
-            // to backfill sections that aren't in the auto-burst, and
-            // every voice frame during a send. The Meshtastic firmware
-            // exposes TORADIO as both WRITE and WRITE_NR; the upstream
-            // Rust code has been running on WRITE_NR for ages, so
-            // compatibility is not in question.
+            // Pick the write type based on payload size against the
+            // negotiated MTU:
+            //
+            //   * `WRITE_NO_RESPONSE` is hard-capped at MTU − 3 bytes
+            //     per write; anything larger is silently truncated by
+            //     the controller. Keeps the per-write GATT ACK
+            //     round-trip off the wire (~12 ms at HIGH priority,
+            //     ~30-50 ms at default), which matters for the burst
+            //     of small frames around connect (`WantConfigId`,
+            //     admin pulls) and for NACK / control traffic.
+            //
+            //   * `WRITE_DEFAULT` (with response) automatically uses
+            //     GATT *Long Write* (Prepare/Execute) when the payload
+            //     exceeds MTU − 3, so frames up to the firmware's
+            //     accept limit get there intact at the cost of one
+            //     ACK round-trip. Required for voice DATA frames
+            //     because a 16-byte v3 header + 215-byte body wraps
+            //     to ~260 bytes of ToRadio protobuf, which truncates
+            //     on a typical 255-byte negotiated MTU.
+            val maxNoResponseBytes = negotiatedMtu - 3
+            val writeType = if (bytes.size > maxNoResponseBytes) {
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            } else {
+                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            }
             val initiated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeCharacteristic(
-                    char, bytes, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE,
-                ) == BluetoothStatusCodes.SUCCESS
+                gatt.writeCharacteristic(char, bytes, writeType) ==
+                    BluetoothStatusCodes.SUCCESS
             } else {
                 @Suppress("DEPRECATION")
                 run {
                     char.value = bytes
-                    char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+                    char.writeType = writeType
                     gatt.writeCharacteristic(char)
                 }
             }
@@ -322,6 +348,9 @@ class BleMeshTransport(
 
         override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
             Log.i(TAG, "MTU changed to $mtu (status=$status)")
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                negotiatedMtu = mtu
+            }
             // Ask the controller to switch to LE 2M PHY where supported.
             // The call is a hint — if either side lacks 2M PHY the stack
             // silently keeps 1M, so this is safe on every radio. On
