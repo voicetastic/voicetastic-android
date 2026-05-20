@@ -166,7 +166,6 @@ class MessagingViewModel(
         AssemblerConfig(
             messageTimeoutMs = (voiceConfig.value.chunkTimeoutSeconds * 1000L).toULong(),
             partialPlayOnTimeout = voiceConfig.value.partialPlayOnTimeout,
-            channelPsk = null,
             maxNackRounds = MAX_NACK_ROUNDS,
             nackWindowMs = NACK_WINDOW_MS,
             completionMemoryMs = COMPLETION_MEMORY_MS,
@@ -441,7 +440,6 @@ class MessagingViewModel(
         val audioData = withContext(Dispatchers.IO) { file.readBytes() }
         val cfg = voiceConfig.value
         val myId = meshService.myNodeId.value ?: "me"
-        val fromNodeNum = NodeIds.nodeIdToNum(myId)?.toUInt() ?: 0u
 
         val (voiceCodec, codecParam) = when (cfg.codec) {
             VoiceCodecChoice.AmrNb -> VoiceCodec.AmrNb to cfg.bitrate.ordinal.toUByte()
@@ -521,8 +519,6 @@ class MessagingViewModel(
             toNode = toNodeNum,
             parityCount = DEFAULT_PARITY_COUNT,
             chunkSize = 0u,        // 0 = MAX_BODY_SIZE (matches previous DEFAULT_CHUNK_SIZE)
-            channelPsk = ByteArray(0),
-            fromNodeNum = fromNodeNum,
             lingerMs = 0uL,        // 0 = default 60 s retain window
             streamSeq = 0u,
             lastInStream = true,
