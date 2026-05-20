@@ -264,6 +264,12 @@ class BleMeshTransport(
                     gatt.writeCharacteristic(char)
                 }
             }
+            // DIAG: every ToRadio write — size, chosen write type, return
+            // value. Lets us confirm whether voice DATA frames really do
+            // pick WRITE_DEFAULT, and whether the call returned SUCCESS.
+            val typeLabel = if (writeType == BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+                "DEFAULT" else "NO_RESPONSE"
+            Log.d(TAG, "writeChar: size=${bytes.size} type=$typeLabel mtu=$negotiatedMtu initiated=$initiated")
             if (!initiated) {
                 Log.e(TAG, "Failed to initiate BLE write (${bytes.size} bytes)")
                 return@withLock
