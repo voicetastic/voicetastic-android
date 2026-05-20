@@ -102,6 +102,26 @@ class MessagingViewModel(
 
         /** Hard cap on NACK rounds per message. Mirrors `NACK_MAX_ROUNDS`. */
         private const val MAX_NACK_ROUNDS: UShort = 32u
+
+        /**
+         * Per-chunk audio body size on the wire, in bytes. Caps the
+         * ToRadio protobuf encoding of each voice chunk to comfortably
+         * fit under a 255-byte BLE ATT MTU (effective payload 252).
+         *
+         * Empirically a `MAX_BODY_SIZE` (215) chunk wraps to a 259-byte
+         * ToRadio on this codebase — 7 bytes over the BLE limit — and
+         * the Meshtastic firmware's BLE stack does not support GATT
+         * Long Write (Prepare/Execute), so any ToRadio above MTU − 3
+         * is silently dropped regardless of the chosen write type. A
+         * 200-byte body yields a ~244-byte ToRadio, leaving ~8 bytes
+         * of headroom for protobuf varint width variation across
+         * different from/to/id values.
+         *
+         * USB transports don't have this constraint but pay only a
+         * small overhead cost (more frames per message); using the
+         * same cap unconditionally keeps the wire format consistent.
+         */
+        private const val BLE_SAFE_CHUNK_SIZE: UInt = 200u
     }
 
     // Master list of ALL chat items (unfiltered)
@@ -518,7 +538,7 @@ class MessagingViewModel(
             broadcast = broadcast,
             toNode = toNodeNum,
             parityCount = DEFAULT_PARITY_COUNT,
-            chunkSize = 0u,        // 0 = MAX_BODY_SIZE (matches previous DEFAULT_CHUNK_SIZE)
+            chunkSize = BLE_SAFE_CHUNK_SIZE,
             lingerMs = 0uL,        // 0 = default 60 s retain window
             streamSeq = 0u,
             lastInStream = true,
