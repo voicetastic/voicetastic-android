@@ -37,6 +37,7 @@ fun ChatScreen(viewModel: MessagingViewModel) {
     val isPlaying by viewModel.isPlaying.collectAsState()
     val playingItemId by viewModel.playingItemId.collectAsState()
     val sendingProgress by viewModel.sendingProgress.collectAsState()
+    val incomingProgress by viewModel.incomingProgress.collectAsState()
     var inputText by remember { mutableStateOf("") }
     var showNodePicker by remember { mutableStateOf(false) }
     var showChannelPicker by remember { mutableStateOf(false) }
@@ -83,19 +84,52 @@ fun ChatScreen(viewModel: MessagingViewModel) {
             }
         }
 
-        // Sending progress for voice
-        sendingProgress?.let { progress ->
-            LinearProgressIndicator(
-                progress = { progress },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 4.dp)
-            )
-            Text(
-                text = stringResource(R.string.chat_sending_voice, (progress * 100).toInt()),
-                style = MaterialTheme.typography.labelSmall,
-                modifier = Modifier.padding(horizontal = 16.dp)
-            )
+        // Both progress banners are scoped to the currently-visible
+        // conversation, matching the same `(contactKey, channel)` pair the
+        // chatItems filter uses. Sending to a node you've since switched
+        // away from won't leak its progress into the new conversation.
+        val currentConversationKey = selectedNode?.nodeId ?: "broadcast"
+
+        // Sending progress for voice (only when sending in this conversation)
+        sendingProgress
+            ?.takeIf { it.contactKey == currentConversationKey && it.channel == selectedChannel }
+            ?.let { progress ->
+                LinearProgressIndicator(
+                    progress = { progress.fraction },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp, vertical = 4.dp)
+                )
+                Text(
+                    text = stringResource(R.string.chat_sending_voice, progress.sent, progress.total),
+                    style = MaterialTheme.typography.labelSmall,
+                    modifier = Modifier.padding(horizontal = 16.dp)
+                )
+            }
+
+        // Receiving progress: one row per in-flight inbound voice message
+        // belonging to *this* conversation.
+        val visibleIncoming = incomingProgress.values.filter {
+            it.contactKey == currentConversationKey && it.channel == selectedChannel
+        }
+        if (visibleIncoming.isNotEmpty()) {
+            Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                visibleIncoming.forEach { rx ->
+                    LinearProgressIndicator(
+                        progress = { rx.fraction },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Text(
+                        text = stringResource(
+                            R.string.chat_receiving_voice,
+                            rx.from,
+                            rx.received,
+                            rx.total
+                        ),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                }
+            }
         }
 
         // Messages list
