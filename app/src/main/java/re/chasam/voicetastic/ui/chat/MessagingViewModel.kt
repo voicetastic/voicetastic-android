@@ -29,13 +29,49 @@ import re.chasam.voicetastic.voice.VoicePlayer
 import re.chasam.voicetastic.voice.VoiceRecorder
 import uniffi.voicetastic.AssemblerConfig
 import uniffi.voicetastic.AssemblyEvent
-import uniffi.voicetastic.BuildConfig
+import uniffi.voicetastic.SendRequestUdl
+import uniffi.voicetastic.SendStatus
 import uniffi.voicetastic.VoiceAssembler as RustVoiceAssembler
 import uniffi.voicetastic.VoiceCodec
 import uniffi.voicetastic.VoiceMessageOut
-import uniffi.voicetastic.buildMessage
-import uniffi.voicetastic.randomMessageId
+import uniffi.voicetastic.VoiceSenderListener
 import java.io.File
+
+/**
+ * Per-message outgoing voice transfer progress, surfaced to the chat UI
+ * while a burst is on its way to the radio. `sent` and `total` are chunk
+ * counts (DATA + parity); the fraction is derived in the view layer.
+ *
+ * `contactKey` and `channel` identify the conversation this send belongs
+ * to so the chat screen can show the banner only in that conversation.
+ */
+data class VoiceTransferProgress(
+    val sent: Int,
+    val total: Int,
+    val contactKey: String,
+    val channel: Int,
+) {
+    val fraction: Float get() = if (total > 0) sent.toFloat() / total else 0f
+}
+
+/**
+ * Per-message incoming voice transfer progress, populated from
+ * `AssemblyEvent.Pending` frames so the UI can show "N / M chunks"
+ * before the message completes.
+ *
+ * `contactKey` is computed the same way as on the completed `ChatItem.Voice`
+ * so progress filtering matches the chat filter exactly.
+ */
+data class VoiceReceiveProgress(
+    val messageId: UInt,
+    val from: String,
+    val received: Int,
+    val total: Int,
+    val channel: Int,
+    val contactKey: String,
+) {
+    val fraction: Float get() = if (total > 0) received.toFloat() / total else 0f
+}
 
 /**
  * ViewModel for the unified chat screen (text + voice messages).
@@ -54,9 +90,6 @@ class MessagingViewModel(
 
         /** Default Reed-Solomon parity chunks per message. 0 = FEC disabled. */
         private const val DEFAULT_PARITY_COUNT: UByte = 0u
-
-        /** Wire chunk body size. Matches `voicetastic_core::voice::MAX_BODY_SIZE`. */
-        private const val DEFAULT_CHUNK_SIZE: UInt = 219u
 
         /** NACK window (ms). Mirrors `voicetastic_core::voice::NACK_WINDOW_MS`. */
         private const val NACK_WINDOW_MS: ULong = 1500uL
@@ -153,8 +186,17 @@ class MessagingViewModel(
     private val _playingItemId = MutableStateFlow<Int?>(null)
     val playingItemId: StateFlow<Int?> = _playingItemId.asStateFlow()
 
-    private val _sendingProgress = MutableStateFlow<Float?>(null)
-    val sendingProgress: StateFlow<Float?> = _sendingProgress.asStateFlow()
+    private val _sendingProgress = MutableStateFlow<VoiceTransferProgress?>(null)
+    val sendingProgress: StateFlow<VoiceTransferProgress?> = _sendingProgress.asStateFlow()
+
+    /**
+     * In-flight inbound voice messages, keyed by `messageId`. Populated as
+     * `AssemblyEvent.Pending` frames arrive; cleared when the message
+     * completes, is rejected, or its UI bubble takes over (the bubble
+     * itself shows received/total chunks on its own).
+     */
+    private val _incomingProgress = MutableStateFlow<Map<UInt, VoiceReceiveProgress>>(emptyMap())
+    val incomingProgress: StateFlow<Map<UInt, VoiceReceiveProgress>> = _incomingProgress.asStateFlow()
 
     val config: StateFlow<VoiceConfig> = voiceConfig.asStateFlow()
 
@@ -224,14 +266,32 @@ class MessagingViewModel(
                     return@collect
                 }
                 when (event) {
-                    is AssemblyEvent.Complete -> _completedVoiceMessages.tryEmit(event.message)
+                    is AssemblyEvent.Complete -> {
+                        _incomingProgress.value = _incomingProgress.value - event.message.messageId
+                        _completedVoiceMessages.tryEmit(event.message)
+                    }
                     is AssemblyEvent.Rejected -> Log.d(TAG, "voice frame rejected: ${event.message}")
                     is AssemblyEvent.Nack -> {
                         // The peer is NACK-ing one of *our* messages. Send-side
                         // retransmit isn't wired yet; just log.
                         Log.d(TAG, "received NACK for messageId=${event.info.messageId}")
                     }
-                    AssemblyEvent.Duplicate, is AssemblyEvent.Pending -> { /* no-op */ }
+                    is AssemblyEvent.Pending -> {
+                        // `Pending` doesn't carry `to`, so derive the contactKey
+                        // from the same packet header `accept` ran on. Matches
+                        // exactly what the completed `ChatItem.Voice` will use,
+                        // so the filter holds end-to-end.
+                        val contactKey = computeContactKey(data.from, data.to, isOutgoing = false)
+                        _incomingProgress.value = _incomingProgress.value + (event.messageId to VoiceReceiveProgress(
+                            messageId = event.messageId,
+                            from = event.from,
+                            received = event.receivedData.toInt(),
+                            total = event.totalData.toInt(),
+                            channel = event.channel.toInt(),
+                            contactKey = contactKey,
+                        ))
+                    }
+                    AssemblyEvent.Duplicate -> { /* no-op */ }
                 }
             }
         }
@@ -266,6 +326,7 @@ class MessagingViewModel(
                     continue
                 }
                 for (msg in out.finalized) {
+                    _incomingProgress.value = _incomingProgress.value - msg.messageId
                     _completedVoiceMessages.tryEmit(msg)
                 }
                 for (nack in out.nacks) {
@@ -385,46 +446,109 @@ class MessagingViewModel(
         val (voiceCodec, codecParam) = when (cfg.codec) {
             VoiceCodecChoice.AmrNb -> VoiceCodec.AmrNb to cfg.bitrate.ordinal.toUByte()
             VoiceCodecChoice.Opus -> VoiceCodec.Opus to cfg.opusBitrateKbps.toUByte()
-        }
-
-        val build = try {
-            buildMessage(
-                audio = audioData,
-                cfg = BuildConfig(
-                    messageId = randomMessageId(),
-                    streamSeq = 0u,
-                    codec = voiceCodec,
-                    codecParam = codecParam,
-                    chunkSize = DEFAULT_CHUNK_SIZE,
-                    parityCount = DEFAULT_PARITY_COUNT,
-                    lastInStream = true,
-                    channelPsk = null,
-                    fromNodeNum = fromNodeNum,
-                ),
-            )
-        } catch (t: Throwable) {
-            Log.e(TAG, "buildMessage failed", t)
-            file.delete()
-            return
+            VoiceCodecChoice.Codec2 -> VoiceCodec.Codec2 to cfg.codec2Mode.ordinal.toUByte()
         }
 
         val destination = _selectedNode.value?.nodeId
         val channel = _selectedChannel.value
-        val frames = build.frames
+        // contactKey for the conversation this send belongs to — matches
+        // the key the outgoing ChatItem.Voice gets below, so the progress
+        // banner only shows in that conversation.
+        val sendContactKey = computeContactKey(myId, destination ?: "broadcast", isOutgoing = true)
+        val toNodeNum: UInt = destination?.let { NodeIds.nodeIdToNum(it)?.toUInt() } ?: 0u
+        val broadcast = destination == null
 
-        _sendingProgress.value = 0f
-        frames.forEachIndexed { index, frame ->
-            meshService.sendData(
-                data = frame,
-                portNum = Portnums.PRIVATE_APP,
-                destination = destination,
-                channel = channel
-            )
-            _sendingProgress.value = (index + 1).toFloat() / frames.size
+        val sender = meshService.voiceSender() ?: run {
+            Log.e(TAG, "sendVoiceFile: VoiceSender unavailable (not connected?)")
+            file.delete()
+            return
         }
-        _sendingProgress.value = null
 
-        // Add to chat as outgoing voice item
+        // Listener runs on a Rust worker thread. Everything we touch here
+        // is thread-safe (MutableStateFlow.value) — no need to dispatch
+        // back to viewModelScope.
+        val listener = object : VoiceSenderListener {
+            override fun `onStatus`(status: SendStatus) {
+                when (status) {
+                    is SendStatus.Building -> {
+                        // First event: now we know total chunks. Seed the
+                        // progress banner at 0 / total so it shows up the
+                        // instant we start, even before the first packet
+                        // leaves the radio.
+                        _sendingProgress.value = VoiceTransferProgress(
+                            sent = 0,
+                            total = status.totalData.toInt() + status.parityCount.toInt(),
+                            contactKey = sendContactKey,
+                            channel = channel,
+                        )
+                    }
+                    is SendStatus.Sending -> {
+                        _sendingProgress.value = VoiceTransferProgress(
+                            sent = status.sent.toInt(),
+                            total = status.total.toInt(),
+                            contactKey = sendContactKey,
+                            channel = channel,
+                        )
+                    }
+                    is SendStatus.Retransmitting -> {
+                        // FEC retransmit: pin the bar to "in flight" rather
+                        // than letting it look done. The next Sending event
+                        // will advance it again.
+                        Log.d(TAG, "voice send: retransmitting ${status.chunks.size} chunks for ${status.messageId}")
+                    }
+                    is SendStatus.Complete,
+                    is SendStatus.GaveUp,
+                    is SendStatus.Failed -> {
+                        if (status is SendStatus.Failed) {
+                            Log.w(TAG, "voice send failed: ${status.message}")
+                        }
+                        _sendingProgress.value = null
+                    }
+                    is SendStatus.BurstComplete -> {
+                        // Initial burst is on the air; we may still get
+                        // Retransmitting events. Don't clear the banner.
+                    }
+                }
+            }
+        }
+
+        val req = SendRequestUdl(
+            audio = audioData,
+            codec = voiceCodec,
+            codecParam = codecParam,
+            channel = channel.toUInt(),
+            broadcast = broadcast,
+            toNode = toNodeNum,
+            parityCount = DEFAULT_PARITY_COUNT,
+            chunkSize = 0u,        // 0 = MAX_BODY_SIZE (matches previous DEFAULT_CHUNK_SIZE)
+            channelPsk = ByteArray(0),
+            fromNodeNum = fromNodeNum,
+            lingerMs = 0uL,        // 0 = default 60 s retain window
+            streamSeq = 0u,
+            lastInStream = true,
+            pacingMs = 0uL,        // 0 = live modem preset
+        )
+
+        val messageId = try {
+            sender.send(req, listener)
+        } catch (t: Throwable) {
+            Log.e(TAG, "VoiceSender.send failed", t)
+            _sendingProgress.value = null
+            file.delete()
+            return
+        }
+        Log.d(TAG, "voice send queued: messageId=$messageId, audioBytes=${audioData.size}")
+
+        // Add to chat as outgoing voice item. `bitrateIndex` doubles as the
+        // codec-specific param the player needs back (Codec2 mode, AMR-NB
+        // bitrate index); Opus playback ignores it. `totalChunks` is left
+        // at 0 — the bubble only renders chunk counts when isComplete is
+        // false, which never happens for outgoing items.
+        val outgoingBitrateIndex = when (cfg.codec) {
+            VoiceCodecChoice.AmrNb -> cfg.bitrate.ordinal
+            VoiceCodecChoice.Codec2 -> cfg.codec2Mode.ordinal
+            VoiceCodecChoice.Opus -> 0
+        }
         val toField = destination ?: "broadcast"
         val item = ChatItem.Voice(
             id = ++itemIdCounter,
@@ -434,9 +558,9 @@ class MessagingViewModel(
             codec = voiceCodec,
             isOutgoing = true,
             isComplete = true,
-            totalChunks = build.totalData.toInt(),
-            receivedChunks = build.totalData.toInt(),
-            bitrateIndex = cfg.bitrate.ordinal,
+            totalChunks = 0,
+            receivedChunks = 0,
+            bitrateIndex = outgoingBitrateIndex,
             channel = channel,
             contactKey = computeContactKey(myId, toField, isOutgoing = true)
         )
@@ -458,7 +582,7 @@ class MessagingViewModel(
 
         _isPlaying.value = true
         _playingItemId.value = item.id
-        player.play(item.audioData, context.cacheDir, item.codec)
+        player.play(item.audioData, context.cacheDir, item.codec, item.bitrateIndex)
     }
 
     /**

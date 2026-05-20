@@ -18,6 +18,7 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import re.chasam.voicetastic.R
 import re.chasam.voicetastic.model.AmrNbBitrate
+import re.chasam.voicetastic.model.Codec2Mode
 import re.chasam.voicetastic.model.VoiceCodecChoice
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -381,14 +382,16 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
             ExpandableConfigCard(title = stringResource(R.string.settings_voice), icon = Icons.Default.Mic) {
                 EnumDropdownSetting(
                     label = "Codec",
-                    options = listOf("AMR-NB", "Opus"),
+                    options = listOf("AMR-NB", "Opus", "Codec2"),
                     selected = when (voiceConfig.codec) {
                         VoiceCodecChoice.AmrNb -> "AMR-NB"
                         VoiceCodecChoice.Opus -> "Opus"
+                        VoiceCodecChoice.Codec2 -> "Codec2"
                     },
                     onSelected = { label ->
                         val codec = when (label) {
                             "Opus" -> VoiceCodecChoice.Opus
+                            "Codec2" -> VoiceCodecChoice.Codec2
                             else -> VoiceCodecChoice.AmrNb
                         }
                         viewModel.setVoiceCodec(codec)
@@ -417,6 +420,19 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                         onValueChange = { viewModel.setOpusBitrateKbps(it.toInt()) },
                         valueRange = 6f..16f,
                         steps = 9
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+
+                // Codec2 settings
+                if (voiceConfig.codec == VoiceCodecChoice.Codec2) {
+                    EnumDropdownSetting(
+                        label = "Codec2 Mode",
+                        options = Codec2Mode.entries.map { it.label },
+                        selected = voiceConfig.codec2Mode.label,
+                        onSelected = { label ->
+                            Codec2Mode.entries.find { it.label == label }?.let { viewModel.setCodec2Mode(it) }
+                        }
                     )
                     Spacer(Modifier.height(8.dp))
                 }

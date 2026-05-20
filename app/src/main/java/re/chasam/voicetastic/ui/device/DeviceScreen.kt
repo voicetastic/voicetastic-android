@@ -34,6 +34,7 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
     val nodes by meshServiceManager.nodes.collectAsState()
     val activeTransport by meshServiceManager.activeTransport.collectAsState()
     val usbDeviceConnected by meshServiceManager.usbConnectedDevice.collectAsState()
+    val isNodeScanning by meshServiceManager.isNodeScanInProgress.collectAsState()
 
     // USB hot-plug events arrive through the OS broadcast pipeline, but we
     // also re-enumerate whenever something interesting happens on screen so
@@ -165,10 +166,20 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.weight(1f)
                 )
-                FilledTonalButton(onClick = { meshServiceManager.requestNodeInfo() }) {
-                    Icon(Icons.Default.Refresh, contentDescription = null)
-                    Spacer(Modifier.width(4.dp))
-                    Text(stringResource(R.string.device_scan_nodes))
+                if (isNodeScanning) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        stringResource(R.string.device_scan_nodes),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                } else {
+                    FilledTonalButton(onClick = { meshServiceManager.requestNodeInfo() }) {
+                        Icon(Icons.Default.Refresh, contentDescription = null)
+                        Spacer(Modifier.width(4.dp))
+                        Text(stringResource(R.string.device_scan_nodes))
+                    }
                 }
             }
             Spacer(Modifier.height(8.dp))

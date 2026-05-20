@@ -34,7 +34,12 @@ class MeshServiceManager(private val context: Context) {
     private val rustService: MeshService = MeshService()
     private var rustSession: RustMeshSession? = null
 
-    private var myNodeNum: Int = 0
+    // Nullable sentinel: `null` means MyNodeInfo hasn't been received yet.
+    // Previously this was `Int = 0`, which collided with valid NodeInfo
+    // bursts arriving before MyNodeInfo — any `ni.num == 0` entry would
+    // match the filter below and clobber `_owner` with a remote user, and
+    // any 0-num peer would land in the node list as `!00000000`.
+    private var myNodeNum: Int? = null
 
     // --- Public state flows ---
     private val _connectionState = MutableStateFlow("DISCONNECTED")
@@ -54,6 +59,25 @@ class MeshServiceManager(private val context: Context) {
 
     private val _firmwareVersion = MutableStateFlow<String?>(null)
     val firmwareVersion: StateFlow<String?> = _firmwareVersion.asStateFlow()
+
+    /**
+     * `true` while a node-info scan is in progress. Held for a fixed window
+     * after [requestNodeInfo] is invoked so the UI has time to swap to a
+     * spinner and so peer NodeInfo replies have a chance to arrive.
+     * Distinct from [isScanning] which tracks BLE device discovery.
+     */
+    private val _isNodeScanInProgress = MutableStateFlow(false)
+    val isNodeScanInProgress: StateFlow<Boolean> = _isNodeScanInProgress.asStateFlow()
+    private var nodeScanJob: Job? = null
+
+    /**
+     * When non-zero, the state listener treats CONFIGURING (which Rust
+     * fires during a refresh burst) as a no-op until this absolute
+     * timestamp passes — i.e. user-initiated refreshes don't visually
+     * disconnect the UI. Set by [requestNodeInfo]; checked by the
+     * state listener in [init].
+     */
+    @Volatile private var suppressConnectingUntilMs: Long = 0L
 
     val discoveredDevices: StateFlow<List<BluetoothDevice>> = deviceDiscovery.discoveredBleDevices
     val isScanning: StateFlow<Boolean> = deviceDiscovery.isScanning
@@ -126,7 +150,7 @@ class MeshServiceManager(private val context: Context) {
     }
 
     private fun clearSessionState() {
-        myNodeNum = 0
+        myNodeNum = null
         configBurstInProgress = false
         _myNodeId.value = null
         _firmwareVersion.value = null
@@ -148,6 +172,7 @@ class MeshServiceManager(private val context: Context) {
     fun onUsbDeviceDetached(device: UsbDevice) = usbTransport.onDeviceDetached(device)
 
     private fun mergeNodeFromUser(nodeNum: Int, payload: ByteArray, rxTime: Long) {
+        if (nodeNum == 0 || nodeNum == MeshtasticBle.BROADCAST_ADDR) return
         val user = runCatching { MeshProtos.User.parseFrom(payload) }.getOrNull() ?: return
         val existing = nodeMap[nodeNum]
         val node = MeshNode(
@@ -163,6 +188,7 @@ class MeshServiceManager(private val context: Context) {
     }
 
     private fun touchNodeLastHeard(nodeNum: Int, rxTime: Long) {
+        if (nodeNum == 0 || nodeNum == MeshtasticBle.BROADCAST_ADDR) return
         if (rxTime == 0L && nodeMap.containsKey(nodeNum)) return
         val existing = nodeMap[nodeNum]
         val node = (existing ?: MeshNode(nodeId = MeshtasticBle.nodeNumToId(nodeNum)))
@@ -224,6 +250,22 @@ class MeshServiceManager(private val context: Context) {
                     MeshConnectionState.DISCONNECTED -> "DISCONNECTED"
                 }
                 Log.d(TAG, "Rust state -> $state (mapped=$mapped)")
+
+                // Suppress CONNECTING (which Rust emits as CONFIGURING during a
+                // user-initiated refresh) while we're already connected and inside
+                // the scan window. Without this, tapping Scan Nodes makes the UI
+                // fall back to the device picker for the duration of the burst.
+                // DISCONNECTED is never suppressed — actual transport loss must
+                // still flow through.
+                val now = System.currentTimeMillis()
+                if (mapped == "CONNECTING"
+                    && _connectionState.value == "CONNECTED"
+                    && now < suppressConnectingUntilMs
+                ) {
+                    Log.d(TAG, "state: suppressing transient CONNECTING during scan refresh")
+                    return
+                }
+
                 _connectionState.value = mapped
                 if (state == MeshConnectionState.DISCONNECTED) {
                     clearSessionState()
@@ -289,13 +331,18 @@ class MeshServiceManager(private val context: Context) {
                 runCatching { MeshProtos.MyNodeInfo.parseFrom(encoded) }
                     .onSuccess { info ->
                         myNodeNum = info.myNodeNum
-                        _myNodeId.value = MeshtasticBle.nodeNumToId(myNodeNum)
+                        _myNodeId.value = MeshtasticBle.nodeNumToId(info.myNodeNum)
                     }
             }
 
             override fun onNodeInfo(encoded: ByteArray) {
                 runCatching { MeshProtos.NodeInfo.parseFrom(encoded) }
                     .onSuccess { ni ->
+                        // `0` is never a real Meshtastic node num; treat it as a
+                        // stale / malformed entry and drop it. Letting it through
+                        // produced "!00000000" rows in the node list and let
+                        // pre-MyNodeInfo entries hijack `_owner`.
+                        if (ni.num == 0) return@onSuccess
                         val node = MeshNode(
                             nodeId = MeshtasticBle.nodeNumToId(ni.num),
                             longName = if (ni.hasUser()) ni.user.longName else "Unknown",
@@ -308,8 +355,9 @@ class MeshServiceManager(private val context: Context) {
                         if (!configBurstInProgress) {
                             _nodes.value = nodeMap.values.toList()
                         }
-                        if (ni.num == myNodeNum && ni.hasUser()) _owner.value = ni.user
-                        if (ni.num == myNodeNum && ni.hasPosition()) _myPosition.value = ni.position
+                        val my = myNodeNum
+                        if (my != null && ni.num == my && ni.hasUser()) _owner.value = ni.user
+                        if (my != null && ni.num == my && ni.hasPosition()) _myPosition.value = ni.position
                     }
             }
 
@@ -395,6 +443,15 @@ class MeshServiceManager(private val context: Context) {
         scope.cancel()
     }
 
+    /**
+     * Lazily-resolved handle to the Rust voice sender. The Rust side caches
+     * one instance per `MeshService`, so we just forward each call —
+     * `voiceSender()` is cheap to re-invoke. Returns null until connected,
+     * to mirror the explicit `isConnected` check the rest of this class uses.
+     */
+    fun voiceSender(): uniffi.voicetastic.VoiceSender? =
+        if (isConnected) runCatching { rustService.voiceSender() }.getOrNull() else null
+
     // ==========  MESHTASTIC PROTOCOL  ==========
 
     fun refreshConfig() {
@@ -408,19 +465,69 @@ class MeshServiceManager(private val context: Context) {
      *
      * Unlike [refreshConfig], this does NOT re-burst the local device's
      * configuration (and does NOT flip the UI back to `CONNECTING`). It just
-     * sends a single NodeInfo packet on the mesh; nearby nodes typically reply
-     * with their own NodeInfo, which arrives via the existing inbound path.
+     * sends a single NodeInfo packet on the mesh; nearby nodes typically
+     * pick it up, update their own DB, and re-broadcast their NodeInfo at
+     * their next interval — at which point we hear them through the
+     * existing inbound NodeInfo path.
+     *
+     * If the local owner record hasn't arrived yet, falls back to a minimal
+     * `User` proto carrying just our node id — peers still get a usable
+     * entry (firmware fills the `from` field on the wire). The previous
+     * implementation silently no-op'd in that race, which made the Scan
+     * button look broken right after connect.
+     *
+     * Holds [isNodeScanInProgress] true for ~10 s so the UI can show a
+     * spinner and so peers have time to reply.
      */
     fun requestNodeInfo(): Boolean {
-        if (!isConnected) return false
-        val user = _owner.value ?: run {
-            Log.w(TAG, "requestNodeInfo: local owner not yet known; skipping")
+        if (!isConnected) {
+            Log.w(TAG, "requestNodeInfo: not connected")
+            return false
+        }
+        val user = _owner.value ?: _myNodeId.value?.let { id ->
+            Log.d(TAG, "requestNodeInfo: owner not yet known; using minimal User(id=$id)")
+            MeshProtos.User.newBuilder().setId(id).build()
+        } ?: run {
+            Log.w(TAG, "requestNodeInfo: my node id unknown; aborting scan")
             return false
         }
         return try {
-            // want_ack = false: broadcast NodeInfo is informational, not addressed.
-            rustService.sendData(Ports.NODEINFO_APP, user.toByteArray(), 0u, null, false)
-            Log.d(TAG, "requestNodeInfo: NodeInfo broadcast sent")
+            // Two-pronged scan:
+            //
+            // 1. Refresh the radio's own node DB. The connected radio has been
+            //    hearing peers passively (text msgs, position broadcasts,
+            //    ambient NodeInfo cycles) and stores them in an internal
+            //    table. `refreshConfig` re-bursts that table, which the bridge
+            //    fans out as `onNodeInfo` callbacks. This is what surfaces
+            //    peers we already know about but haven't displayed yet.
+            //
+            // 2. Broadcast our own NodeInfo with want_response=true. Peers
+            //    on firmware that honors this reply with their own NodeInfo,
+            //    which arrives via the same path.
+            //
+            // The state-listener's suppress check above prevents (1) from
+            // making the UI flicker back to the device picker.
+            suppressConnectingUntilMs = System.currentTimeMillis() + 15_000L
+            runCatching { rustService.refreshConfig() }
+                .onFailure { Log.e(TAG, "requestNodeInfo: refreshConfig failed", it) }
+
+            val pktId = rustService.sendData(
+                Ports.NODEINFO_APP,
+                user.toByteArray(),
+                0u,
+                null,
+                false, // want_ack
+                true,  // want_response
+            )
+            Log.d(TAG, "requestNodeInfo: refresh+broadcast fired (pktId=$pktId, ownerKnown=${_owner.value != null})")
+
+            // Visual scan window: 10 s covers the refresh burst + typical
+            // peer reply latency, and self-clears so the button reverts.
+            nodeScanJob?.cancel()
+            nodeScanJob = scope.launch {
+                _isNodeScanInProgress.value = true
+                try { delay(10_000) } finally { _isNodeScanInProgress.value = false }
+            }
             true
         } catch (e: Exception) {
             Log.e(TAG, "requestNodeInfo failed", e)
@@ -491,7 +598,13 @@ class MeshServiceManager(private val context: Context) {
         }
     }
 
-    fun sendData(data: ByteArray, portNum: Int, destination: String? = null, channel: Int = 0): Boolean {
+    fun sendData(
+        data: ByteArray,
+        portNum: Int,
+        destination: String? = null,
+        channel: Int = 0,
+        wantResponse: Boolean = false,
+    ): Boolean {
         if (!isConnected) {
             Log.w(TAG, "sendData dropped: not connected (state=${_connectionState.value}, transport=${_activeTransport.value})")
             return false
@@ -507,8 +620,8 @@ class MeshServiceManager(private val context: Context) {
         }
 
         return try {
-            val id = rustService.sendData(portNum, data, channel.toUInt(), destUInt, true)
-            Log.d(TAG, "sendData ok (id=$id, port=$portNum, dest=${destination ?: "broadcast"}, ch=$channel, len=${data.size})")
+            val id = rustService.sendData(portNum, data, channel.toUInt(), destUInt, true, wantResponse)
+            Log.d(TAG, "sendData ok (id=$id, port=$portNum, dest=${destination ?: "broadcast"}, ch=$channel, len=${data.size}, wantResponse=$wantResponse)")
             true
         } catch (e: Exception) {
             Log.e(TAG, "sendData failed", e)

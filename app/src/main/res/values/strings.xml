@@ -7,7 +7,8 @@
     <string name="chat_channel_label">Ch %d</string>
     <string name="chat_select_node">Select node</string>
     <string name="chat_broadcast">Broadcast</string>
-    <string name="chat_sending_voice">Sending voice message\u2026 %d%%</string>
+    <string name="chat_sending_voice">Sending voice message\u2026 %1$d / %2$d chunks</string>
+    <string name="chat_receiving_voice">Receiving voice from %1$s\u2026 %2$d / %3$d chunks</string>
     <string name="chat_cancel">Cancel</string>
     <string name="chat_recording">Recording\u2026</string>
     <string name="chat_send">Send</string>
