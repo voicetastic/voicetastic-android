@@ -16,6 +16,8 @@ enum class VoiceCodecChoice {
  * @param codec2Mode Codec2 mode (0=3200, 1=2400, 2=1600, 3=1400, 4=1300, 5=1200); used when codec=Codec2
  * @param maxDurationSeconds Maximum recording duration in seconds (1–60)
  * @param chunkTimeoutSeconds Timeout for receiving all chunks of a voice message
+ * @param partialPlayOnTimeout Play partially-received voice when reassembly timer fires
+ * @param noiseSuppressionEnabled Use AudioSource.VOICE_COMMUNICATION + NoiseSuppressor / AGC during recording. Disable for raw mic capture.
  */
 data class VoiceConfig(
     val codec: VoiceCodecChoice = VoiceCodecChoice.AmrNb,
@@ -24,7 +26,8 @@ data class VoiceConfig(
     val codec2Mode: Codec2Mode = Codec2Mode.MODE_3200,
     val maxDurationSeconds: Int = 20,
     val chunkTimeoutSeconds: Int = 30,
-    val partialPlayOnTimeout: Boolean = true
+    val partialPlayOnTimeout: Boolean = true,
+    val noiseSuppressionEnabled: Boolean = true,
 )
 
 /**

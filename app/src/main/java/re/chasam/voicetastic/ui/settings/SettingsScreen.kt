@@ -452,6 +452,10 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                     steps = 22
                 )
                 SwitchSetting("Partial Play on Timeout", voiceConfig.partialPlayOnTimeout) { viewModel.setPartialPlayOnTimeout(it) }
+                SwitchSetting(
+                    "Noise Suppression",
+                    voiceConfig.noiseSuppressionEnabled
+                ) { viewModel.setNoiseSuppressionEnabled(it) }
             }
         }
 

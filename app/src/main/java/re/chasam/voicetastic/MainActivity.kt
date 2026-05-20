@@ -15,8 +15,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material3.MaterialTheme
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.launch
 import re.chasam.voicetastic.model.VoiceConfig
+import re.chasam.voicetastic.model.VoiceConfigStore
 import re.chasam.voicetastic.navigation.AppNavigation
 import re.chasam.voicetastic.service.MeshServiceManager
 import re.chasam.voicetastic.ui.chat.MessagingViewModel
@@ -28,6 +32,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var messagingViewModel: MessagingViewModel
     private lateinit var configViewModel: ConfigViewModel
 
+    // Initialised in initializeApp() so we can hand the activity context
+    // to VoiceConfigStore before constructing the flow. Default value is
+    // used as a fallback if persistence has never been written.
+    private lateinit var voiceConfigStore: VoiceConfigStore
     private val voiceConfig = MutableStateFlow(VoiceConfig())
 
     /**
@@ -80,6 +88,17 @@ class MainActivity : ComponentActivity() {
 
     private fun initializeApp() {
         meshServiceManager = MeshServiceManager(this)
+
+        // Hydrate voice config from disk before wiring view models so the
+        // first render sees the user's last-saved values (codec choice,
+        // mode, noise suppression toggle, etc.) instead of defaults.
+        voiceConfigStore = VoiceConfigStore(this)
+        voiceConfig.value = voiceConfigStore.load()
+        // `drop(1)` skips the initial emission we just set above — no
+        // point writing back what we just read.
+        lifecycleScope.launch {
+            voiceConfig.drop(1).collect { voiceConfigStore.save(it) }
+        }
 
         messagingViewModel = MessagingViewModel(meshServiceManager, this, voiceConfig)
         configViewModel = ConfigViewModel(meshServiceManager, voiceConfig)
