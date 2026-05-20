@@ -342,11 +342,23 @@ class MeshServiceManager(private val context: Context) {
                         // stale / malformed entry and drop it. Letting it through
                         // produced "!00000000" rows in the node list and let
                         // pre-MyNodeInfo entries hijack `_owner`.
-                        if (ni.num == 0) return@onSuccess
+                        if (ni.num == 0) {
+                            Log.d(TAG, "onNodeInfo: dropping num=0 entry")
+                            return@onSuccess
+                        }
+                        val nodeIdStr = MeshtasticBle.nodeNumToId(ni.num)
+                        val longName = if (ni.hasUser()) ni.user.longName else "Unknown"
+                        val shortName = if (ni.hasUser()) ni.user.shortName else "??"
+                        Log.d(
+                            TAG,
+                            "onNodeInfo: $nodeIdStr long='$longName' short='$shortName' " +
+                                "hasUser=${ni.hasUser()} lastHeard=${ni.lastHeard} " +
+                                "burst=$configBurstInProgress mapSizeBefore=${nodeMap.size}"
+                        )
                         val node = MeshNode(
-                            nodeId = MeshtasticBle.nodeNumToId(ni.num),
-                            longName = if (ni.hasUser()) ni.user.longName else "Unknown",
-                            shortName = if (ni.hasUser()) ni.user.shortName else "??",
+                            nodeId = nodeIdStr,
+                            longName = longName,
+                            shortName = shortName,
                             lastHeard = ni.lastHeard.toLong(),
                             batteryLevel = if (ni.hasDeviceMetrics()) ni.deviceMetrics.batteryLevel.toInt() else null,
                             snr = if (ni.snr != 0f) ni.snr else null,

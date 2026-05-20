@@ -566,6 +566,9 @@ class ConfigViewModel(
     fun setPartialPlayOnTimeout(enabled: Boolean) {
         voiceConfig.value = voiceConfig.value.copy(partialPlayOnTimeout = enabled)
     }
+    fun setNoiseSuppressionEnabled(enabled: Boolean) {
+        voiceConfig.value = voiceConfig.value.copy(noiseSuppressionEnabled = enabled)
+    }
 
     // ========================  APPLY METHODS  ========================
 
