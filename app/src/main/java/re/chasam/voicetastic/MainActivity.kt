@@ -13,18 +13,22 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
+import re.chasam.voicetastic.model.ThemePreference
+import re.chasam.voicetastic.model.ThemePreferenceStore
 import re.chasam.voicetastic.model.VoiceConfig
 import re.chasam.voicetastic.model.VoiceConfigStore
 import re.chasam.voicetastic.navigation.AppNavigation
 import re.chasam.voicetastic.service.MeshServiceManager
 import re.chasam.voicetastic.ui.chat.MessagingViewModel
 import re.chasam.voicetastic.ui.settings.ConfigViewModel
+import re.chasam.voicetastic.ui.theme.AppTheme
 
 class MainActivity : ComponentActivity() {
 
@@ -37,6 +41,9 @@ class MainActivity : ComponentActivity() {
     // used as a fallback if persistence has never been written.
     private lateinit var voiceConfigStore: VoiceConfigStore
     private val voiceConfig = MutableStateFlow(VoiceConfig())
+
+    private lateinit var themePreferenceStore: ThemePreferenceStore
+    private val themePreference = MutableStateFlow(ThemePreference.SYSTEM)
 
     /**
      * Listens for USB device hot-plug / unplug events broadcast by the OS.
@@ -100,6 +107,12 @@ class MainActivity : ComponentActivity() {
             voiceConfig.drop(1).collect { voiceConfigStore.save(it) }
         }
 
+        themePreferenceStore = ThemePreferenceStore(this)
+        themePreference.value = themePreferenceStore.load()
+        lifecycleScope.launch {
+            themePreference.drop(1).collect { themePreferenceStore.save(it) }
+        }
+
         messagingViewModel = MessagingViewModel(meshServiceManager, this, voiceConfig)
         configViewModel = ConfigViewModel(meshServiceManager, voiceConfig)
 
@@ -109,11 +122,14 @@ class MainActivity : ComponentActivity() {
         // user picks the transport on the Devices screen.
 
         setContent {
-            MaterialTheme {
+            val currentTheme by themePreference.collectAsState()
+            AppTheme(preference = currentTheme) {
                 AppNavigation(
                     messagingViewModel = messagingViewModel,
                     configViewModel = configViewModel,
-                    meshServiceManager = meshServiceManager
+                    meshServiceManager = meshServiceManager,
+                    themePreference = currentTheme,
+                    onThemePreferenceChange = { themePreference.value = it }
                 )
             }
         }
