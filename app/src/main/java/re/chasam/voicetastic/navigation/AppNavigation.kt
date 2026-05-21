@@ -9,12 +9,14 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import re.chasam.voicetastic.R
+import re.chasam.voicetastic.model.ThemePreference
 import re.chasam.voicetastic.service.MeshServiceManager
 import re.chasam.voicetastic.ui.chat.ChatScreen
 import re.chasam.voicetastic.ui.chat.MessagingViewModel
@@ -33,7 +35,9 @@ enum class Screen(val route: String, val titleResId: Int, val icon: ImageVector)
 fun AppNavigation(
     messagingViewModel: MessagingViewModel,
     configViewModel: ConfigViewModel,
-    meshServiceManager: MeshServiceManager
+    meshServiceManager: MeshServiceManager,
+    themePreference: ThemePreference,
+    onThemePreferenceChange: (ThemePreference) -> Unit
 ) {
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
@@ -43,10 +47,12 @@ fun AppNavigation(
         topBar = {
             TopAppBar(
                 title = { Text("Voicetastic") },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    titleContentColor = MaterialTheme.colorScheme.onPrimary
-                )
+                navigationIcon = {
+                    Icon(
+                        painter = painterResource(R.drawable.ic_launcher_foreground),
+                        contentDescription = null
+                    )
+                }
             )
         },
         bottomBar = {
@@ -84,7 +90,11 @@ fun AppNavigation(
                 ChatScreen(viewModel = messagingViewModel)
             }
             composable(Screen.Settings.route) {
-                SettingsScreen(viewModel = configViewModel)
+                SettingsScreen(
+                    viewModel = configViewModel,
+                    themePreference = themePreference,
+                    onThemePreferenceChange = onThemePreferenceChange
+                )
             }
         }
     }

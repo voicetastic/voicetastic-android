@@ -19,11 +19,16 @@ import androidx.compose.ui.unit.dp
 import re.chasam.voicetastic.R
 import re.chasam.voicetastic.model.AmrNbBitrate
 import re.chasam.voicetastic.model.Codec2Mode
+import re.chasam.voicetastic.model.ThemePreference
 import re.chasam.voicetastic.model.VoiceCodecChoice
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(viewModel: ConfigViewModel) {
+fun SettingsScreen(
+    viewModel: ConfigViewModel,
+    themePreference: ThemePreference,
+    onThemePreferenceChange: (ThemePreference) -> Unit
+) {
     val connectionState by viewModel.connectionState.collectAsState()
     val configStatus by viewModel.configStatus.collectAsState()
     val myNodeId by viewModel.myNodeId.collectAsState()
@@ -90,9 +95,44 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
             }
         }
 
-        // ===== Owner =====
+        // ===== Appearance =====
         item {
-            ExpandableConfigCard(title = stringResource(R.string.settings_user_owner), icon = Icons.Default.Person) {
+            Card {
+                Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Default.Palette, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            stringResource(R.string.settings_appearance),
+                            style = MaterialTheme.typography.titleMedium
+                        )
+                    }
+                    Spacer(Modifier.height(12.dp))
+                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+                        ThemePreference.entries.forEachIndexed { index, pref ->
+                            SegmentedButton(
+                                selected = themePreference == pref,
+                                onClick = { onThemePreferenceChange(pref) },
+                                shape = SegmentedButtonDefaults.itemShape(
+                                    index = index,
+                                    count = ThemePreference.entries.size
+                                )
+                            ) {
+                                Text(stringResource(pref.labelRes))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // ===== Meshtastic (device-side config) =====
+        item {
+            ExpandableSection(
+                title = stringResource(R.string.settings_meshtastic),
+                icon = Icons.Default.Hub
+            ) {
+                ExpandableConfigCard(title = stringResource(R.string.settings_user_owner), icon = Icons.Default.Person) {
                 OutlinedTextField(
                     value = ownerState.longName,
                     onValueChange = { viewModel.setOwnerLongName(it) },
@@ -115,10 +155,8 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                     Text(stringResource(R.string.settings_apply_owner))
                 }
             }
-        }
 
-        // ===== LoRa =====
-        item {
+            // ===== LoRa =====
             ExpandableConfigCard(title = stringResource(R.string.settings_lora_radio), icon = Icons.Default.Settings) {
                 EnumDropdownSetting(stringResource(R.string.settings_region), viewModel.regions, loraState.region) { viewModel.setLoraRegion(it) }
                 Spacer(Modifier.height(8.dp))
@@ -157,10 +195,8 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                     Text(stringResource(R.string.settings_apply_lora))
                 }
             }
-        }
 
-        // ===== Device =====
-        item {
+            // ===== Device =====
             ExpandableConfigCard(title = stringResource(R.string.settings_device), icon = Icons.Default.PhoneAndroid) {
                 EnumDropdownSetting(stringResource(R.string.settings_role), viewModel.deviceRoles, deviceState.role) { viewModel.setDeviceRole(it) }
                 Spacer(Modifier.height(8.dp))
@@ -186,10 +222,8 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                     Text(stringResource(R.string.settings_apply_device))
                 }
             }
-        }
 
-        // ===== Position =====
-        item {
+            // ===== Position =====
             ExpandableConfigCard(title = stringResource(R.string.settings_position), icon = Icons.Default.LocationOn) {
                 EnumDropdownSetting("GPS Mode", viewModel.gpsModes, positionState.gpsMode) { viewModel.setPositionGpsMode(it) }
                 Spacer(Modifier.height(8.dp))
@@ -229,10 +263,8 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                     Text(stringResource(R.string.settings_apply_position))
                 }
             }
-        }
 
-        // ===== Power =====
-        item {
+            // ===== Power =====
             ExpandableConfigCard(title = stringResource(R.string.settings_power), icon = Icons.Default.BatteryChargingFull) {
                 SwitchSetting("Power Saving", powerState.isPowerSaving) { viewModel.setPowerSaving(it) }
                 Spacer(Modifier.height(8.dp))
@@ -254,10 +286,8 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                     Text(stringResource(R.string.settings_apply_power))
                 }
             }
-        }
 
-        // ===== Network =====
-        item {
+            // ===== Network =====
             ExpandableConfigCard(title = stringResource(R.string.settings_network), icon = Icons.Default.Wifi) {
                 SwitchSetting("WiFi Enabled", networkState.wifiEnabled) { viewModel.setNetworkWifiEnabled(it) }
                 Spacer(Modifier.height(8.dp))
@@ -295,10 +325,8 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                     Text(stringResource(R.string.settings_apply_network))
                 }
             }
-        }
 
-        // ===== Display =====
-        item {
+            // ===== Display =====
             ExpandableConfigCard(title = stringResource(R.string.settings_display), icon = Icons.Default.Tv) {
                 NumberFieldSetting("Screen On (s)", displayState.screenOnSecs) { viewModel.setDisplayScreenOnSecs(it) }
                 Spacer(Modifier.height(8.dp))
@@ -324,10 +352,8 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                     Text(stringResource(R.string.settings_apply_display))
                 }
             }
-        }
 
-        // ===== Bluetooth =====
-        item {
+            // ===== Bluetooth =====
             ExpandableConfigCard(title = stringResource(R.string.settings_bluetooth), icon = Icons.Default.Bluetooth) {
                 SwitchSetting("Enabled", bluetoothState.enabled) { viewModel.setBluetoothEnabled(it) }
                 Spacer(Modifier.height(8.dp))
@@ -339,10 +365,8 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                     Text(stringResource(R.string.settings_apply_bluetooth))
                 }
             }
-        }
 
-        // ===== Channels =====
-        item {
+            // ===== Channels =====
             ExpandableConfigCard(title = stringResource(R.string.settings_channels), icon = Icons.Default.Forum) {
                 if (channelsState.isEmpty()) {
                     Text(stringResource(R.string.settings_no_channels), style = MaterialTheme.typography.bodyMedium)
@@ -375,11 +399,27 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
                     }
                 }
             }
+
+            // ===== Device Actions =====
+            ExpandableConfigCard(title = stringResource(R.string.settings_device_actions), icon = Icons.Default.Warning) {
+                OutlinedButton(onClick = { viewModel.rebootDevice() }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.settings_reboot))
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
+                    onClick = { viewModel.factoryReset() },
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text(stringResource(R.string.settings_factory_reset))
+                }
+            }
+            }
         }
 
         // ===== Voice Config =====
         item {
-            ExpandableConfigCard(title = stringResource(R.string.settings_voice), icon = Icons.Default.Mic) {
+            ExpandableSection(title = stringResource(R.string.settings_voice), icon = Icons.Default.Mic) {
                 EnumDropdownSetting(
                     label = "Codec",
                     options = listOf("AMR-NB", "Opus", "Codec2"),
@@ -459,26 +499,41 @@ fun SettingsScreen(viewModel: ConfigViewModel) {
             }
         }
 
-        // ===== Device Actions =====
-        item {
-            ExpandableConfigCard(title = stringResource(R.string.settings_device_actions), icon = Icons.Default.Warning) {
-                OutlinedButton(onClick = { viewModel.rebootDevice() }, modifier = Modifier.fillMaxWidth()) {
-                    Text(stringResource(R.string.settings_reboot))
-                }
-                Spacer(Modifier.height(8.dp))
-                OutlinedButton(
-                    onClick = { viewModel.factoryReset() },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
-                ) {
-                    Text(stringResource(R.string.settings_factory_reset))
-                }
-            }
-        }
     }
 }
 
 // ========================  REUSABLE COMPOSABLES  ========================
+
+@Composable
+private fun ExpandableSection(
+    title: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    content: @Composable ColumnScope.() -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Column {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { expanded = !expanded }
+                .padding(vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(icon, contentDescription = null, modifier = Modifier.size(28.dp))
+            Spacer(Modifier.width(12.dp))
+            Text(title, style = MaterialTheme.typography.titleLarge, modifier = Modifier.weight(1f))
+            Icon(
+                if (expanded) Icons.Default.ExpandLess else Icons.Default.ExpandMore,
+                contentDescription = if (expanded) stringResource(R.string.settings_collapse) else stringResource(R.string.settings_expand)
+            )
+        }
+        AnimatedVisibility(visible = expanded) {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                content()
+            }
+        }
+    }
+}
 
 @Composable
 private fun ExpandableConfigCard(
