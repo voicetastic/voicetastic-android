@@ -42,6 +42,11 @@
     <string name="device_connect">Connect</string>
 
     <!-- Settings Screen -->
+    <string name="settings_appearance">Appearance</string>
+    <string name="settings_theme_system">System</string>
+    <string name="settings_theme_light">Light</string>
+    <string name="settings_theme_dark">Dark</string>
+    <string name="settings_meshtastic">Meshtastic</string>
     <string name="settings_status_format">Meshtastic: %s</string>
     <string name="settings_node_id">Node: %s</string>
     <string name="settings_firmware">Firmware: %s</string>
