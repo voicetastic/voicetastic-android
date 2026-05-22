@@ -35,6 +35,15 @@ class VoicePlayer {
     var onCompletion: (() -> Unit)? = null
 
     /**
+     * Serialises teardown so the framework callbacks (onCompletion,
+     * onError, onMarkerReached) can't race the UI calling [stop] or a
+     * second [play] mid-cleanup. Without this, double-release of the
+     * MediaPlayer / AudioTrack is observable, and `isPlaying` can flip
+     * inconsistently relative to the actual framework state.
+     */
+    private val playLock = Any()
+
+    /**
      * Play audio from a byte array.
      *
      * @param audioData codec-encoded bytes (AMR file, OGG for Opus, packed Codec2 frames)
@@ -63,14 +72,15 @@ class VoicePlayer {
             player.setDataSource(file.absolutePath)
             player.setOnCompletionListener {
                 Log.i(TAG, "Playback completed")
-                this.isPlaying = false
-                onCompletion?.invoke()
-                cleanup()
+                finishPlayback(notify = true)
             }
             player.setOnErrorListener { _, what, extra ->
                 Log.e(TAG, "Playback error: what=$what extra=$extra")
-                this.isPlaying = false
-                cleanup()
+                // Notify the VM so its isPlaying / playingItemId unstick;
+                // before this fix the error path tore the player down
+                // without firing onCompletion, leaving the UI thinking
+                // playback was still in flight forever.
+                finishPlayback(notify = true)
                 true
             }
             player.prepare()
@@ -80,7 +90,7 @@ class VoicePlayer {
             Log.i(TAG, "Playback started ($codec): ${audioData.size} bytes")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to play audio", e)
-            cleanup()
+            finishPlayback(notify = true)
         }
     }
 
@@ -89,12 +99,12 @@ class VoicePlayer {
             codec2Decode(audioData, mode).toShortArray()
         } catch (e: Exception) {
             Log.e(TAG, "Codec2 decode failed", e)
-            onCompletion?.invoke()
+            finishPlayback(notify = true)
             return
         }
         if (pcm.isEmpty()) {
             Log.w(TAG, "Codec2: decoded 0 PCM samples")
-            onCompletion?.invoke()
+            finishPlayback(notify = true)
             return
         }
 
@@ -128,7 +138,7 @@ class VoicePlayer {
                 .build()
         } catch (e: Exception) {
             Log.e(TAG, "Codec2: AudioTrack build failed", e)
-            onCompletion?.invoke()
+            finishPlayback(notify = true)
             return
         }
         audioTrack = track
@@ -142,9 +152,7 @@ class VoicePlayer {
         track.setPlaybackPositionUpdateListener(object :
             AudioTrack.OnPlaybackPositionUpdateListener {
             override fun onMarkerReached(track: AudioTrack) {
-                isPlaying = false
-                onCompletion?.invoke()
-                cleanup()
+                finishPlayback(notify = true)
             }
             override fun onPeriodicNotification(track: AudioTrack) {}
         })
@@ -155,15 +163,11 @@ class VoicePlayer {
     }
 
     /**
-     * Stop playback if currently playing.
+     * Stop playback if currently playing. User-initiated, so does **not**
+     * fire [onCompletion] — the caller already knows it asked to stop.
      */
     fun stop() {
-        if (isPlaying) {
-            try { mediaPlayer?.stop() } catch (_: Exception) {}
-            try { audioTrack?.stop() } catch (_: Exception) {}
-        }
-        cleanup()
-        isPlaying = false
+        finishPlayback(notify = false)
     }
 
     /**
@@ -173,14 +177,49 @@ class VoicePlayer {
         stop()
     }
 
-    private fun cleanup() {
-        try { mediaPlayer?.release() } catch (_: Exception) {}
-        mediaPlayer = null
+    /**
+     * Single point of teardown for all paths (user stop, framework
+     * completion, framework error, marker reached). Synchronised so the
+     * framework callback threads can't race the UI thread and cause
+     * double-release of the MediaPlayer / AudioTrack.
+     *
+     * @param notify if true, invoke [onCompletion] exactly once (used for
+     *   framework-driven completion / error / marker paths so the
+     *   ViewModel can clear its `isPlaying` flag). Set false for
+     *   user-initiated stops.
+     */
+    private fun finishPlayback(notify: Boolean) {
+        val shouldNotify: Boolean
+        synchronized(playLock) {
+            // Only the first caller wins. If we're already torn down,
+            // skip the framework calls and the notification — callbacks
+            // arriving after a user-initiated stop must not re-fire
+            // onCompletion behind the caller's back. tempFile is checked
+            // too so a failed `play()` (file written, but MediaPlayer
+            // setup threw) still gets its temp file cleaned up.
+            if (!isPlaying && mediaPlayer == null && audioTrack == null && tempFile == null) {
+                return
+            }
+            shouldNotify = notify && isPlaying
+            isPlaying = false
 
-        try { audioTrack?.release() } catch (_: Exception) {}
-        audioTrack = null
+            try { mediaPlayer?.stop() } catch (_: Exception) {}
+            try { mediaPlayer?.release() } catch (_: Exception) {}
+            mediaPlayer = null
 
-        try { tempFile?.delete() } catch (_: Exception) {}
-        tempFile = null
+            try { audioTrack?.stop() } catch (_: Exception) {}
+            try { audioTrack?.release() } catch (_: Exception) {}
+            audioTrack = null
+
+            try { tempFile?.delete() } catch (_: Exception) {}
+            tempFile = null
+        }
+        // Fire the completion callback outside the lock so the listener
+        // is free to call back into us (e.g. play the next message).
+        if (shouldNotify) {
+            try { onCompletion?.invoke() } catch (e: Exception) {
+                Log.w(TAG, "onCompletion listener threw", e)
+            }
+        }
     }
 }

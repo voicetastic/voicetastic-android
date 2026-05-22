@@ -610,11 +610,23 @@ class MeshServiceManager(private val context: Context) {
         }
     }
 
+    /**
+     * Send an arbitrary data packet on the mesh.
+     *
+     * @param wantAck request firmware-side hop ACKs for this packet.
+     *   Default is **false** because most uses of this entry point are
+     *   control-class traffic (voice NACK reframes today) where the
+     *   per-packet ACK round-trip just adds mesh congestion without
+     *   any sender-side benefit — voice retransmit is FEC-driven, not
+     *   ACK-driven. Set to true only when the caller genuinely needs
+     *   delivery confirmation (e.g. user-visible text or admin ops).
+     */
     fun sendData(
         data: ByteArray,
         portNum: Int,
         destination: String? = null,
         channel: Int = 0,
+        wantAck: Boolean = false,
         wantResponse: Boolean = false,
     ): Boolean {
         if (!isConnected) {
@@ -632,8 +644,8 @@ class MeshServiceManager(private val context: Context) {
         }
 
         return try {
-            val id = rustService.sendData(portNum, data, channel.toUInt(), destUInt, true, wantResponse)
-            Log.d(TAG, "sendData ok (id=$id, port=$portNum, dest=${destination ?: "broadcast"}, ch=$channel, len=${data.size}, wantResponse=$wantResponse)")
+            val id = rustService.sendData(portNum, data, channel.toUInt(), destUInt, wantAck, wantResponse)
+            Log.d(TAG, "sendData ok (id=$id, port=$portNum, dest=${destination ?: "broadcast"}, ch=$channel, len=${data.size}, wantAck=$wantAck, wantResponse=$wantResponse)")
             true
         } catch (e: Exception) {
             Log.e(TAG, "sendData failed", e)
