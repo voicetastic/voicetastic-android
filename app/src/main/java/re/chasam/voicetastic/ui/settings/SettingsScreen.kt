@@ -9,6 +9,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -22,6 +23,14 @@ import re.chasam.voicetastic.model.Codec2Mode
 import re.chasam.voicetastic.model.ThemePreference
 import re.chasam.voicetastic.model.VoiceCodecChoice
 
+/**
+ * Destructive device-side actions that must be confirmed before firing.
+ * Held in a single `rememberSaveable` state so a rotation while the
+ * dialog is open doesn't dismiss it (and doesn't accidentally re-fire
+ * the action either).
+ */
+private enum class PendingDeviceAction { Reboot, FactoryReset }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
@@ -29,6 +38,7 @@ fun SettingsScreen(
     themePreference: ThemePreference,
     onThemePreferenceChange: (ThemePreference) -> Unit
 ) {
+    var pendingAction by rememberSaveable { mutableStateOf<PendingDeviceAction?>(null) }
     val connectionState by viewModel.connectionState.collectAsState()
     val configStatus by viewModel.configStatus.collectAsState()
     val myNodeId by viewModel.myNodeId.collectAsState()
@@ -143,8 +153,13 @@ fun SettingsScreen(
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = ownerState.shortName,
-                    onValueChange = { viewModel.setOwnerShortName(it) },
+                    // Cap at 4 chars at the UI layer so the user sees the
+                    // limit (the firmware also rejects > 4) instead of
+                    // typing freely and discovering on Apply that the
+                    // ViewModel silently truncated their input.
+                    onValueChange = { viewModel.setOwnerShortName(it.take(4)) },
                     label = { Text(stringResource(R.string.settings_short_name)) },
+                    supportingText = { Text("${ownerState.shortName.length}/4") },
                     modifier = Modifier.fillMaxWidth(),
                     singleLine = true
                 )
@@ -402,12 +417,15 @@ fun SettingsScreen(
 
             // ===== Device Actions =====
             ExpandableConfigCard(title = stringResource(R.string.settings_device_actions), icon = Icons.Default.Warning) {
-                OutlinedButton(onClick = { viewModel.rebootDevice() }, modifier = Modifier.fillMaxWidth()) {
+                OutlinedButton(
+                    onClick = { pendingAction = PendingDeviceAction.Reboot },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
                     Text(stringResource(R.string.settings_reboot))
                 }
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
-                    onClick = { viewModel.factoryReset() },
+                    onClick = { pendingAction = PendingDeviceAction.FactoryReset },
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
                 ) {
@@ -499,6 +517,44 @@ fun SettingsScreen(
             }
         }
 
+    }
+
+    pendingAction?.let { action ->
+        val (titleRes, messageRes) = when (action) {
+            PendingDeviceAction.Reboot ->
+                R.string.settings_reboot_confirm_title to R.string.settings_reboot_confirm_message
+            PendingDeviceAction.FactoryReset ->
+                R.string.settings_factory_reset_confirm_title to R.string.settings_factory_reset_confirm_message
+        }
+        val destructive = action == PendingDeviceAction.FactoryReset
+        AlertDialog(
+            onDismissRequest = { pendingAction = null },
+            title = { Text(stringResource(titleRes)) },
+            text = { Text(stringResource(messageRes)) },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        when (action) {
+                            PendingDeviceAction.Reboot -> viewModel.rebootDevice()
+                            PendingDeviceAction.FactoryReset -> viewModel.factoryReset()
+                        }
+                        pendingAction = null
+                    },
+                    colors = if (destructive) {
+                        ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error)
+                    } else {
+                        ButtonDefaults.textButtonColors()
+                    },
+                ) {
+                    Text(stringResource(R.string.settings_confirm))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { pendingAction = null }) {
+                    Text(stringResource(R.string.settings_cancel))
+                }
+            },
+        )
     }
 }
 

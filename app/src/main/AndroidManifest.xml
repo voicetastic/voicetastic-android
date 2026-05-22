@@ -3,14 +3,22 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <!--
+      Location is required by the platform for BLE scanning on Android 11
+      and below. On Android 12+ we declare BLUETOOTH_SCAN with the
+      `neverForLocation` flag, which signals to the OS that we do not
+      derive location from BLE results — so location permission is not
+      needed there and is scoped out via maxSdkVersion.
+    -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation"
         tools:targetApi="s" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"
+        tools:targetApi="s" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
     <!-- USB host (used to talk to a Meshtastic node over a USB serial cable). -->

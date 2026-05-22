@@ -13,8 +13,23 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -44,6 +59,18 @@ class MainActivity : ComponentActivity() {
 
     private lateinit var themePreferenceStore: ThemePreferenceStore
     private val themePreference = MutableStateFlow(ThemePreference.SYSTEM)
+
+    /**
+     * Drives the Compose tree: true once [initializeApp] has run and all
+     * lateinit fields are populated. Setting `setContent` unconditionally
+     * in `onCreate` (rather than only after permissions are granted)
+     * means a process-death restore can never end up with `setContent`
+     * holding references to uninitialised lateinit fields, and a
+     * permission denial leaves the user with a visible explanation
+     * instead of a frozen blank screen.
+     */
+    private var initialized by mutableStateOf(false)
+    private var permissionsDenied by mutableStateOf(false)
 
     /**
      * Listens for USB device hot-plug / unplug events broadcast by the OS.
@@ -79,17 +106,45 @@ class MainActivity : ComponentActivity() {
     ) { permissions ->
         val allGranted = permissions.values.all { it }
         if (allGranted) {
+            permissionsDenied = false
             initializeApp()
+        } else {
+            permissionsDenied = true
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // setContent unconditionally so the Compose tree is always live —
+        // it reacts to `initialized` and `permissionsDenied` instead of
+        // being gated by them. Without this, a process-death restore
+        // followed by a permission denial leaves the activity with no
+        // visible UI at all.
+        setContent { Root() }
+
         if (hasRequiredPermissions()) {
             initializeApp()
         } else {
             requestPermissions()
+        }
+    }
+
+    @Composable
+    private fun Root() {
+        val currentTheme by themePreference.collectAsState()
+        AppTheme(preference = currentTheme) {
+            when {
+                initialized -> AppNavigation(
+                    messagingViewModel = messagingViewModel,
+                    configViewModel = configViewModel,
+                    meshServiceManager = meshServiceManager,
+                    themePreference = currentTheme,
+                    onThemePreferenceChange = { themePreference.value = it },
+                )
+                permissionsDenied -> PermissionsDeniedScreen(onRetry = ::requestPermissions)
+                else -> LoadingScreen()
+            }
         }
     }
 
@@ -121,18 +176,10 @@ class MainActivity : ComponentActivity() {
         // either, even if the OS launched us via USB_DEVICE_ATTACHED. The
         // user picks the transport on the Devices screen.
 
-        setContent {
-            val currentTheme by themePreference.collectAsState()
-            AppTheme(preference = currentTheme) {
-                AppNavigation(
-                    messagingViewModel = messagingViewModel,
-                    configViewModel = configViewModel,
-                    meshServiceManager = meshServiceManager,
-                    themePreference = currentTheme,
-                    onThemePreferenceChange = { themePreference.value = it }
-                )
-            }
-        }
+        // Flip last: the Compose Root is already live, and this single
+        // assignment swaps the loading screen for the real navigation
+        // tree once every lateinit above has been populated.
+        initialized = true
     }
 
     private fun registerUsbReceiver() {
@@ -165,14 +212,47 @@ class MainActivity : ComponentActivity() {
         permissionLauncher.launch(getRequiredPermissions())
     }
 
+    @Composable
+    private fun LoadingScreen() {
+        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {}
+    }
+
+    @Composable
+    private fun PermissionsDeniedScreen(onRetry: () -> Unit) {
+        Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.permissions_denied_title),
+                        style = MaterialTheme.typography.titleLarge,
+                    )
+                    Text(
+                        text = stringResource(R.string.permissions_denied_body),
+                        style = MaterialTheme.typography.bodyMedium,
+                    )
+                    androidx.compose.material3.OutlinedButton(onClick = onRetry) {
+                        Text(stringResource(R.string.permissions_denied_retry))
+                    }
+                }
+            }
+        }
+    }
+
     private fun getRequiredPermissions(): Array<String> {
-        val permissions = mutableListOf(
-            Manifest.permission.RECORD_AUDIO,
-            Manifest.permission.ACCESS_FINE_LOCATION
-        )
+        val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            // Android 12+: BLE scan/connect runtime perms; BLUETOOTH_SCAN
+            // is declared with `neverForLocation` in the manifest so
+            // location is not required.
             permissions.add(Manifest.permission.BLUETOOTH_SCAN)
             permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            // Android 11 and below: the platform requires fine location
+            // to allow BLE scanning at all.
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
         }
         return permissions.toTypedArray()
     }

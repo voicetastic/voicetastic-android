@@ -66,6 +66,10 @@ class DeviceDiscoveryManager(private val context: Context) {
     @SuppressLint("MissingPermission")
     fun startBleScan() {
         if (destroyed) return
+        if (!BlePermissions.canScan(context)) {
+            Log.w(TAG, "startBleScan: BLE scan permission not granted (user revoked?)")
+            return
+        }
         val adapter = bluetoothAdapter()
         if (adapter == null) {
             Log.w(TAG, "startBleScan: no Bluetooth adapter")

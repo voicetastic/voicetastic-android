@@ -252,7 +252,13 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8 in release: shrinks + obfuscates the app classes, and
+            // strips unused resources to keep the APK small. The
+            // `proguard-rules.pro` keeps JNA / UniFFI / Protobuf / USB
+            // serial — anything reached through reflection or JNI that
+            // R8's static analysis can't see.
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
