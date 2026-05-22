@@ -26,7 +26,9 @@ import re.chasam.voicetastic.model.VoiceCodecChoice
 import re.chasam.voicetastic.service.MeshFacade
 import re.chasam.voicetastic.service.Portnums
 import re.chasam.voicetastic.voice.VoicePlayer
+import re.chasam.voicetastic.voice.VoicePlayerApi
 import re.chasam.voicetastic.voice.VoiceRecorder
+import re.chasam.voicetastic.voice.VoiceRecorderApi
 import uniffi.voicetastic.AssemblerConfig
 import uniffi.voicetastic.AssemblyEvent
 import uniffi.voicetastic.SendRequestUdl
@@ -82,7 +84,11 @@ data class VoiceReceiveProgress(
 class MessagingViewModel(
     private val meshService: MeshFacade,
     private val context: Context,
-    private val voiceConfig: MutableStateFlow<VoiceConfig> = MutableStateFlow(VoiceConfig())
+    private val voiceConfig: MutableStateFlow<VoiceConfig> = MutableStateFlow(VoiceConfig()),
+    // Voice components are injectable for tests; production callers
+    // never pass these and get the framework-backed implementations.
+    private val recorder: VoiceRecorderApi = VoiceRecorder(context),
+    private val player: VoicePlayerApi = VoicePlayer(),
 ) : ViewModel() {
 
     companion object {
@@ -200,9 +206,8 @@ class MessagingViewModel(
         }
         .stateIn(viewModelScope, SharingStarted.Eagerly, listOf(0 to "Primary"))
 
-    // Voice state
-    private val recorder = VoiceRecorder(context)
-    private val player = VoicePlayer()
+    // Voice state — recorder/player are injected via the constructor
+    // (see VoiceRecorderApi / VoicePlayerApi) so tests can swap fakes.
 
     /**
      * Native voice assembler. Owned by this ViewModel; closed in [onCleared].

@@ -23,7 +23,7 @@ import kotlin.concurrent.thread
  * captures raw PCM via [AudioRecord] and feeds it through the Rust
  * [Codec2Encoder] one frame at a time, writing packed Codec2 bytes to disk.
  */
-class VoiceRecorder(private val context: Context) {
+class VoiceRecorder(private val context: Context) : VoiceRecorderApi {
 
     companion object {
         private const val TAG = "VoiceRecorder"
@@ -58,7 +58,7 @@ class VoiceRecorder(private val context: Context) {
      * @param config voice configuration (codec, bitrate, max duration)
      * @return the output file where audio will be saved, or null on failure
      */
-    fun startRecording(config: VoiceConfig): File? {
+    override fun startRecording(config: VoiceConfig): File? {
         if (isRecording) {
             Log.w(TAG, "Already recording")
             return outputFile
@@ -318,7 +318,7 @@ class VoiceRecorder(private val context: Context) {
      *
      * @return the recorded audio file, or null if not currently recording
      */
-    fun stopRecording(): File? = synchronized(stopLock) {
+    override fun stopRecording(): File? = synchronized(stopLock) {
         if (!isRecording) return null
         isRecording = false
 
@@ -360,7 +360,7 @@ class VoiceRecorder(private val context: Context) {
         }
     }
 
-    fun isCurrentlyRecording(): Boolean = isRecording
+    override fun isCurrentlyRecording(): Boolean = isRecording
 
     /**
      * Best-effort teardown used only on error paths. Caller must hold
