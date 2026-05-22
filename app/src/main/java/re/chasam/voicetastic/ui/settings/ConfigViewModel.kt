@@ -437,7 +437,7 @@ class ConfigViewModel(
 
     // --- Owner ---
     fun setOwnerLongName(name: String) { markDirty("owner"); _ownerState.value = _ownerState.value.copy(longName = name) }
-    fun setOwnerShortName(name: String) { markDirty("owner"); _ownerState.value = _ownerState.value.copy(shortName = name.take(4)) }
+    fun setOwnerShortName(name: String) { markDirty("owner"); _ownerState.value = _ownerState.value.copy(shortName = name) }
     fun setOwnerIsLicensed(licensed: Boolean) { markDirty("owner"); _ownerState.value = _ownerState.value.copy(isLicensed = licensed) }
 
     // --- LoRa ---
@@ -811,9 +811,18 @@ class ConfigViewModel(
             _configStatus.value = "Channels not yet loaded — refresh first"; return
         }
         val chUi = _channelsState.value.find { it.index == index } ?: return
+        val pskBytes = try {
+            chUi.pskHex.hexToBytes()
+        } catch (e: IllegalArgumentException) {
+            // Surface malformed PSK to the user instead of crashing the
+            // apply path. Don't clear the dirty flag — the user's edit
+            // is still pending until they fix the field.
+            _configStatus.value = "Channel $index PSK invalid: ${e.message}"
+            return
+        }
         val settings = MeshProtos.ChannelSettings.newBuilder()
             .setName(chUi.name)
-            .setPsk(com.google.protobuf.ByteString.copyFrom(chUi.pskHex.hexToBytes()))
+            .setPsk(com.google.protobuf.ByteString.copyFrom(pskBytes))
             .setUplinkEnabled(chUi.uplinkEnabled)
             .setDownlinkEnabled(chUi.downlinkEnabled)
             .build()
@@ -881,11 +890,29 @@ class ConfigViewModel(
 
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
 
+    /**
+     * Parse a hex-encoded byte string into raw bytes.
+     *
+     * Accepts optional `0x` prefix and embedded whitespace. Throws
+     * [IllegalArgumentException] with a user-readable message on
+     * malformed input — callers (currently [applyChannel]) catch this
+     * and surface it via [_configStatus] instead of letting a
+     * `NumberFormatException` propagate and crash the apply path.
+     */
     private fun String.hexToBytes(): ByteArray {
-        val clean = this.replace(" ", "").replace("0x", "")
+        val clean = this.replace(" ", "").replace("0x", "", ignoreCase = true)
         if (clean.isEmpty()) return byteArrayOf()
+        require(clean.length % 2 == 0) {
+            "PSK hex must have an even number of digits (got ${clean.length})"
+        }
+        require(clean.all { it.isHexChar() }) {
+            "PSK hex contains non-hex characters"
+        }
         return clean.chunked(2).map { it.toInt(16).toByte() }.toByteArray()
     }
+
+    private fun Char.isHexChar(): Boolean =
+        this in '0'..'9' || this in 'a'..'f' || this in 'A'..'F'
 
     /** Generic display helper for proto enums: returns the enum name, or
      *  "<fallback> (#<rawNumber>)" if the firmware sent a value our proto doesn't know about. */

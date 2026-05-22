@@ -186,6 +186,16 @@ class BleMeshTransport(
             return
         }
         setupListener = listener
+        if (!BlePermissions.canConnect(context)) {
+            // Manifest declares BLUETOOTH_CONNECT and the activity
+            // requests it at launch on API 31+; if we get here the user
+            // revoked it from system settings. Fail the setup listener
+            // so the caller can surface the error in the UI instead of
+            // the GATT layer throwing a SecurityException later.
+            Log.e(TAG, "connectGatt: BLUETOOTH_CONNECT permission not granted")
+            emitSetup(false, "Bluetooth connect permission denied")
+            return
+        }
         Log.i(TAG, "Opening GATT to ${device.name ?: device.address}")
         gatt = device.connectGatt(context, /* autoConnect = */ false, gattCallback,
             BluetoothDevice.TRANSPORT_LE)
