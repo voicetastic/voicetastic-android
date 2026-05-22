@@ -13,13 +13,13 @@ import io.mockk.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import re.chasam.voicetastic.model.AmrNbBitrate
 import re.chasam.voicetastic.model.VoiceConfig
-import re.chasam.voicetastic.service.MeshServiceManager
+import re.chasam.voicetastic.service.MeshFacade
 import re.chasam.voicetastic.ui.settings.ConfigViewModel
 
 class ConfigurationSteps {
 
     private lateinit var configViewModel: ConfigViewModel
-    private lateinit var meshService: MeshServiceManager
+    private lateinit var meshService: MeshFacade
     private val voiceConfig = MutableStateFlow(VoiceConfig())
     private var isConnected = true
 

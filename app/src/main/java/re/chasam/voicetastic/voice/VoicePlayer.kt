@@ -17,7 +17,7 @@ import java.io.FileOutputStream
  * - Codec2: decoded to 8 kHz mono PCM via the Rust bridge, then streamed
  *   through an [AudioTrack] — Android has no native codec for Codec2.
  */
-class VoicePlayer {
+class VoicePlayer : VoicePlayerApi {
 
     companion object {
         private const val TAG = "VoicePlayer"
@@ -29,10 +29,10 @@ class VoicePlayer {
     private var tempFile: File? = null
 
     @Volatile
-    var isPlaying: Boolean = false
+    override var isPlaying: Boolean = false
         private set
 
-    var onCompletion: (() -> Unit)? = null
+    override var onCompletion: (() -> Unit)? = null
 
     /**
      * Serialises teardown so the framework callbacks (onCompletion,
@@ -51,7 +51,7 @@ class VoicePlayer {
      * @param codec the codec used for encoding — selects MediaPlayer vs AudioTrack path
      * @param codecParam codec-specific parameter (Codec2 mode for VoiceCodec.Codec2)
      */
-    fun play(audioData: ByteArray, cacheDir: File, codec: VoiceCodec, codecParam: Int = 0) {
+    override fun play(audioData: ByteArray, cacheDir: File, codec: VoiceCodec, codecParam: Int) {
         stop()
 
         if (codec is VoiceCodec.Codec2) {
@@ -166,14 +166,14 @@ class VoicePlayer {
      * Stop playback if currently playing. User-initiated, so does **not**
      * fire [onCompletion] — the caller already knows it asked to stop.
      */
-    fun stop() {
+    override fun stop() {
         finishPlayback(notify = false)
     }
 
     /**
      * Release all resources.
      */
-    fun release() {
+    override fun release() {
         stop()
     }
 

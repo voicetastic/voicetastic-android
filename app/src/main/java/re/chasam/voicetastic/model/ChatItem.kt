@@ -48,12 +48,45 @@ sealed class ChatItem {
         override val channel: Int = 0,
         override val contactKey: String = "broadcast"
     ) : ChatItem() {
+        // ByteArray uses reference equality by default — the compiler-
+        // generated `equals` on this data class would compare audioData
+        // by identity, so two Voice items with identical contents but
+        // different byte buffers would compare unequal. Override to use
+        // content-equality for audioData; everything else is value-typed
+        // and behaves correctly under the default rules.
         override fun equals(other: Any?): Boolean {
             if (this === other) return true
             if (other !is Voice) return false
-            return id == other.id && from == other.from
+            return id == other.id &&
+                from == other.from &&
+                to == other.to &&
+                timestamp == other.timestamp &&
+                isOutgoing == other.isOutgoing &&
+                codec == other.codec &&
+                isComplete == other.isComplete &&
+                totalChunks == other.totalChunks &&
+                receivedChunks == other.receivedChunks &&
+                bitrateIndex == other.bitrateIndex &&
+                channel == other.channel &&
+                contactKey == other.contactKey &&
+                audioData.contentEquals(other.audioData)
         }
 
-        override fun hashCode(): Int = 31 * id + from.hashCode()
+        override fun hashCode(): Int {
+            var result = id
+            result = 31 * result + from.hashCode()
+            result = 31 * result + to.hashCode()
+            result = 31 * result + timestamp.hashCode()
+            result = 31 * result + isOutgoing.hashCode()
+            result = 31 * result + codec.hashCode()
+            result = 31 * result + isComplete.hashCode()
+            result = 31 * result + totalChunks
+            result = 31 * result + receivedChunks
+            result = 31 * result + bitrateIndex
+            result = 31 * result + channel
+            result = 31 * result + contactKey.hashCode()
+            result = 31 * result + audioData.contentHashCode()
+            return result
+        }
     }
 }
