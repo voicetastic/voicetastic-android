@@ -23,7 +23,7 @@ import re.chasam.voicetastic.model.ChatItem
 import re.chasam.voicetastic.model.MeshNode
 import re.chasam.voicetastic.model.VoiceConfig
 import re.chasam.voicetastic.model.VoiceCodecChoice
-import re.chasam.voicetastic.service.MeshServiceManager
+import re.chasam.voicetastic.service.MeshFacade
 import re.chasam.voicetastic.service.Portnums
 import re.chasam.voicetastic.voice.VoicePlayer
 import re.chasam.voicetastic.voice.VoiceRecorder
@@ -80,7 +80,7 @@ data class VoiceReceiveProgress(
  * the UniFFI-generated [uniffi.voicetastic] bindings. See `INTEGRATION.md`.
  */
 class MessagingViewModel(
-    private val meshService: MeshServiceManager,
+    private val meshService: MeshFacade,
     private val context: Context,
     private val voiceConfig: MutableStateFlow<VoiceConfig> = MutableStateFlow(VoiceConfig())
 ) : ViewModel() {
