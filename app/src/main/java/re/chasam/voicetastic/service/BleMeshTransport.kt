@@ -429,7 +429,17 @@ class BleMeshTransport(
             g: BluetoothGatt, descriptor: BluetoothGattDescriptor, status: Int,
         ) {
             Log.i(TAG, "Descriptor write status=$status")
-            onSetupComplete()
+            // Only mark setup complete if the CCCD write actually
+            // succeeded. Before this check we marked setup complete
+            // regardless: a failed CCCD left notifications **not**
+            // armed, so the firmware's reply to the very first
+            // WantConfigId never reached us, presenting as a connected
+            // GATT that produces zero inbound traffic.
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                onSetupComplete()
+            } else {
+                emitSetup(false, "CCCD descriptor write failed (status=$status)")
+            }
         }
 
         override fun onCharacteristicRead(
@@ -463,6 +473,15 @@ class BleMeshTransport(
         override fun onCharacteristicWrite(
             g: BluetoothGatt, characteristic: BluetoothGattCharacteristic, status: Int,
         ) {
+            // Surface non-success writes. The semaphore is still released
+            // so [doWrite] doesn't hang waiting for an ACK that won't
+            // come — but the caller can correlate this log with the
+            // matching "writeChar:" line at debug level to find drops.
+            // Voice / text loss with no other symptom usually shows up
+            // here first.
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "Characteristic write returned status=$status")
+            }
             writeSemaphore.release()
         }
 
