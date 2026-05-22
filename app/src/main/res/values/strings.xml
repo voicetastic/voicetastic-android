@@ -1,5 +1,8 @@
 <resources>
     <string name="app_name">Voicetastic</string>
+    <string name="permissions_denied_title">Voicetastic needs a few permissions</string>
+    <string name="permissions_denied_body">Microphone access is required to record voice messages, and Bluetooth permissions are required to talk to your Meshtastic node. Grant them in Settings or tap Retry to be asked again.</string>
+    <string name="permissions_denied_retry">Retry</string>
 
     <!-- Chat Screen -->
     <string name="chat_status_connected">Mesh: %s</string>
@@ -79,6 +82,12 @@
     <string name="settings_device_actions">Device Actions</string>
     <string name="settings_reboot">Reboot Device</string>
     <string name="settings_factory_reset">Factory Reset</string>
+    <string name="settings_reboot_confirm_title">Reboot device?</string>
+    <string name="settings_reboot_confirm_message">The radio will disconnect for a few seconds while it restarts.</string>
+    <string name="settings_factory_reset_confirm_title">Factory reset device?</string>
+    <string name="settings_factory_reset_confirm_message">This wipes all configuration on the radio (channels, owner, position, network) and cannot be undone.</string>
+    <string name="settings_confirm">Confirm</string>
+    <string name="settings_cancel">Cancel</string>
     <string name="settings_apply_lora">Apply LoRa Config</string>
     <string name="settings_apply_device">Apply Device Config</string>
     <string name="settings_apply_position">Apply Position Config</string>
