@@ -14,12 +14,12 @@ import io.mockk.every
 import io.mockk.mockk
 import kotlinx.coroutines.flow.MutableStateFlow
 import re.chasam.voicetastic.model.Message
-import re.chasam.voicetastic.service.MeshServiceManager
+import re.chasam.voicetastic.service.MeshFacade
 import re.chasam.voicetastic.service.Portnums
 
 class MessagingSteps {
 
-    private lateinit var meshService: MeshServiceManager
+    private lateinit var meshService: MeshFacade
     private val sentPackets = mutableListOf<SentPacket>()
     private val messages = mutableListOf<Message>()
     private var myNodeId: String = ""

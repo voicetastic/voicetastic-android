@@ -10,15 +10,15 @@ import re.chasam.voicetastic.model.AmrNbBitrate
 import re.chasam.voicetastic.model.Codec2Mode
 import re.chasam.voicetastic.model.VoiceCodecChoice
 import re.chasam.voicetastic.model.VoiceConfig
-import re.chasam.voicetastic.service.MeshServiceManager
+import re.chasam.voicetastic.service.MeshFacade
 
 /**
  * ViewModel for the settings/configuration screen.
  * Manages Meshtastic device config (all sections), channels, owner, modules, and app voice config.
- * Observes config flows from MeshServiceManager and populates UI state on connection.
+ * Observes config flows from MeshFacade and populates UI state on connection.
  */
 class ConfigViewModel(
-    private val meshService: MeshServiceManager,
+    private val meshService: MeshFacade,
     private val voiceConfig: MutableStateFlow<VoiceConfig>
 ) : ViewModel() {
 
