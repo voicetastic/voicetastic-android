@@ -122,10 +122,35 @@ class MessagingViewModel(
          * same cap unconditionally keeps the wire format consistent.
          */
         private const val BLE_SAFE_CHUNK_SIZE: UInt = 200u
+
+        /**
+         * Hard cap on retained chat items across all conversations.
+         *
+         * The list is the source of truth for the entire chat history of
+         * a session, so without a cap an always-on listener accumulates
+         * indefinitely — voice items in particular carry the full audio
+         * payload in memory until the user clears the chat. Eviction is
+         * FIFO (drop the oldest) which is the right policy for a chat:
+         * the user can always scroll back through the most recent N.
+         * 1000 items covers months of typical low-bandwidth mesh use.
+         */
+        private const val MAX_CHAT_ITEMS = 1_000
     }
 
     // Master list of ALL chat items (unfiltered)
     private val _allChatItems = MutableStateFlow<List<ChatItem>>(emptyList())
+
+    /**
+     * Append a [ChatItem] to [_allChatItems], evicting the oldest entries
+     * once the list exceeds [MAX_CHAT_ITEMS]. All append sites go through
+     * here so the bound is uniform; bypassing it means a memory leak.
+     */
+    private fun appendChatItem(item: ChatItem) {
+        val current = _allChatItems.value
+        val withItem = current + item
+        _allChatItems.value =
+            if (withItem.size > MAX_CHAT_ITEMS) withItem.takeLast(MAX_CHAT_ITEMS) else withItem
+    }
 
     private val _selectedNode = MutableStateFlow<MeshNode?>(null)
     val selectedNode: StateFlow<MeshNode?> = _selectedNode.asStateFlow()
@@ -260,7 +285,7 @@ class MessagingViewModel(
                     channel = incoming.channel,
                     contactKey = contactKey
                 )
-                _allChatItems.value = _allChatItems.value + item
+                appendChatItem(item)
             }
         }
     }
@@ -319,7 +344,7 @@ class MessagingViewModel(
     private fun observeCompletedVoiceMessages() {
         viewModelScope.launch {
             _completedVoiceMessages.collect { msg ->
-                _allChatItems.value = _allChatItems.value + msg.toChatItem()
+                appendChatItem(msg.toChatItem())
             }
         }
     }
@@ -412,7 +437,7 @@ class MessagingViewModel(
                 channel = channel,
                 contactKey = computeContactKey(myId, toField, isOutgoing = true)
             )
-            _allChatItems.value = _allChatItems.value + item
+            appendChatItem(item)
         }
     }
 
@@ -580,7 +605,7 @@ class MessagingViewModel(
             channel = channel,
             contactKey = computeContactKey(myId, toField, isOutgoing = true)
         )
-        _allChatItems.value = _allChatItems.value + item
+        appendChatItem(item)
 
         file.delete()
     }
