@@ -18,14 +18,14 @@ import uniffi.voicetastic.MeshService
 import uniffi.voicetastic.MeshStateListener
 import uniffi.voicetastic.MeshTextListener
 
-class MeshServiceManager(private val context: Context) {
+class MeshServiceManager(private val context: Context) : MeshFacade {
 
     companion object {
         private const val TAG = "MeshServiceManager"
     }
-
-    data class IncomingText(val from: String, val to: String, val text: String, val channel: Int = 0, val timestamp: Long = System.currentTimeMillis())
-    data class IncomingData(val from: String, val to: String, val portNum: Int, val payload: ByteArray, val channel: Int = 0, val timestamp: Long = System.currentTimeMillis())
+    // IncomingText / IncomingData / TransportType moved to MeshTypes.kt
+    // so the [MeshFacade] interface can reference them without
+    // depending on this concrete class.
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
@@ -43,22 +43,22 @@ class MeshServiceManager(private val context: Context) {
 
     // --- Public state flows ---
     private val _connectionState = MutableStateFlow("DISCONNECTED")
-    val connectionState: StateFlow<String> = _connectionState.asStateFlow()
+    override val connectionState: StateFlow<String> = _connectionState.asStateFlow()
 
     private val _nodes = MutableStateFlow<List<MeshNode>>(emptyList())
-    val nodes: StateFlow<List<MeshNode>> = _nodes.asStateFlow()
+    override val nodes: StateFlow<List<MeshNode>> = _nodes.asStateFlow()
 
     private val _incomingTextMessages = MutableSharedFlow<IncomingText>(extraBufferCapacity = 64)
-    val incomingTextMessages: SharedFlow<IncomingText> = _incomingTextMessages.asSharedFlow()
+    override val incomingTextMessages: SharedFlow<IncomingText> = _incomingTextMessages.asSharedFlow()
 
     private val _incomingDataMessages = MutableSharedFlow<IncomingData>(extraBufferCapacity = 64)
-    val incomingDataMessages: SharedFlow<IncomingData> = _incomingDataMessages.asSharedFlow()
+    override val incomingDataMessages: SharedFlow<IncomingData> = _incomingDataMessages.asSharedFlow()
 
     private val _myNodeId = MutableStateFlow<String?>(null)
-    val myNodeId: StateFlow<String?> = _myNodeId.asStateFlow()
+    override val myNodeId: StateFlow<String?> = _myNodeId.asStateFlow()
 
     private val _firmwareVersion = MutableStateFlow<String?>(null)
-    val firmwareVersion: StateFlow<String?> = _firmwareVersion.asStateFlow()
+    override val firmwareVersion: StateFlow<String?> = _firmwareVersion.asStateFlow()
 
     /**
      * `true` while a node-info scan is in progress. Held for a fixed window
@@ -67,7 +67,7 @@ class MeshServiceManager(private val context: Context) {
      * Distinct from [isScanning] which tracks BLE device discovery.
      */
     private val _isNodeScanInProgress = MutableStateFlow(false)
-    val isNodeScanInProgress: StateFlow<Boolean> = _isNodeScanInProgress.asStateFlow()
+    override val isNodeScanInProgress: StateFlow<Boolean> = _isNodeScanInProgress.asStateFlow()
     private var nodeScanJob: Job? = null
 
     /**
@@ -79,22 +79,21 @@ class MeshServiceManager(private val context: Context) {
      */
     @Volatile private var suppressConnectingUntilMs: Long = 0L
 
-    val discoveredDevices: StateFlow<List<BluetoothDevice>> = deviceDiscovery.discoveredBleDevices
-    val isScanning: StateFlow<Boolean> = deviceDiscovery.isScanning
+    override val discoveredDevices: StateFlow<List<BluetoothDevice>> = deviceDiscovery.discoveredBleDevices
+    override val isScanning: StateFlow<Boolean> = deviceDiscovery.isScanning
 
     // ==========  USB TRANSPORT  ==========
-
-    enum class TransportType { NONE, BLE, USB }
+    // TransportType moved to MeshTypes.kt (top-level).
 
     private val usbTransport: UsbMeshTransport = UsbMeshTransport(context)
     private var usbActive: Boolean = false
 
-    val usbState: StateFlow<UsbMeshTransport.State> = usbTransport.state
-    val usbConnectedDevice: StateFlow<UsbDevice?> = usbTransport.connectedDevice
-    val usbErrors: SharedFlow<String> = usbTransport.errors
+    override val usbState: StateFlow<UsbMeshTransport.State> = usbTransport.state
+    override val usbConnectedDevice: StateFlow<UsbDevice?> = usbTransport.connectedDevice
+    override val usbErrors: SharedFlow<String> = usbTransport.errors
 
     private val _activeTransport = MutableStateFlow(TransportType.NONE)
-    val activeTransport: StateFlow<TransportType> = _activeTransport.asStateFlow()
+    override val activeTransport: StateFlow<TransportType> = _activeTransport.asStateFlow()
 
     // NOTE: the listener-registration `init { ... }` block lives further down
     // in the file, AFTER every StateFlow / nodeMap field is declared. The
@@ -104,14 +103,15 @@ class MeshServiceManager(private val context: Context) {
     // so they MUST already be initialised. Kotlin runs initialisers in
     // declaration order, hence the deliberate placement.
 
-    fun discoverUsbDevices(): List<UsbSerialDriver> = deviceDiscovery.discoverUsbDevices()
+    override fun discoverUsbDevices(): List<UsbSerialDriver> = deviceDiscovery.discoverUsbDevices()
 
-    fun usbHasPermission(device: UsbDevice): Boolean = usbTransport.hasPermission(device)
+    override fun usbHasPermission(device: UsbDevice): Boolean = usbTransport.hasPermission(device)
 
-    fun requestUsbPermission(device: UsbDevice, onResult: (Boolean) -> Unit) =
+    override fun requestUsbPermission(device: UsbDevice, onResult: (Boolean) -> Unit) {
         usbTransport.requestPermission(device, onResult)
+    }
 
-    fun connectUsb(driver: UsbSerialDriver): Boolean {
+    override fun connectUsb(driver: UsbSerialDriver): Boolean {
         runCatching { rustSession?.close() }
         rustSession = null
         usbActive = true
@@ -138,7 +138,7 @@ class MeshServiceManager(private val context: Context) {
         return ok
     }
 
-    fun disconnectUsb() {
+    override fun disconnectUsb() {
         runCatching { rustSession?.close() }
         rustSession = null
         usbTransport.disconnect()
@@ -169,7 +169,9 @@ class MeshServiceManager(private val context: Context) {
         _moduleConfigs.value = emptyMap()
     }
 
-    fun onUsbDeviceDetached(device: UsbDevice) = usbTransport.onDeviceDetached(device)
+    override fun onUsbDeviceDetached(device: UsbDevice) {
+        usbTransport.onDeviceDetached(device)
+    }
 
     private fun mergeNodeFromUser(nodeNum: Int, payload: ByteArray, rxTime: Long) {
         if (nodeNum == 0 || nodeNum == MeshtasticBle.BROADCAST_ADDR) return
@@ -199,46 +201,46 @@ class MeshServiceManager(private val context: Context) {
 
     // --- Per-section config flows ---
     private val _radioConfig = MutableStateFlow<MeshProtos.Config.LoRaConfig?>(null)
-    val radioConfig: StateFlow<MeshProtos.Config.LoRaConfig?> = _radioConfig.asStateFlow()
+    override val radioConfig: StateFlow<MeshProtos.Config.LoRaConfig?> = _radioConfig.asStateFlow()
 
     private val _deviceConfig = MutableStateFlow<MeshProtos.Config.DeviceConfig?>(null)
-    val deviceConfig: StateFlow<MeshProtos.Config.DeviceConfig?> = _deviceConfig.asStateFlow()
+    override val deviceConfig: StateFlow<MeshProtos.Config.DeviceConfig?> = _deviceConfig.asStateFlow()
 
     private val _positionConfig = MutableStateFlow<MeshProtos.Config.PositionConfig?>(null)
-    val positionConfig: StateFlow<MeshProtos.Config.PositionConfig?> = _positionConfig.asStateFlow()
+    override val positionConfig: StateFlow<MeshProtos.Config.PositionConfig?> = _positionConfig.asStateFlow()
 
     private val _myPosition = MutableStateFlow<MeshProtos.Position?>(null)
-    val myPosition: StateFlow<MeshProtos.Position?> = _myPosition.asStateFlow()
+    override val myPosition: StateFlow<MeshProtos.Position?> = _myPosition.asStateFlow()
 
     private val _powerConfig = MutableStateFlow<MeshProtos.Config.PowerConfig?>(null)
-    val powerConfig: StateFlow<MeshProtos.Config.PowerConfig?> = _powerConfig.asStateFlow()
+    override val powerConfig: StateFlow<MeshProtos.Config.PowerConfig?> = _powerConfig.asStateFlow()
 
     private val _networkConfig = MutableStateFlow<MeshProtos.Config.NetworkConfig?>(null)
-    val networkConfig: StateFlow<MeshProtos.Config.NetworkConfig?> = _networkConfig.asStateFlow()
+    override val networkConfig: StateFlow<MeshProtos.Config.NetworkConfig?> = _networkConfig.asStateFlow()
 
     private val _displayConfig = MutableStateFlow<MeshProtos.Config.DisplayConfig?>(null)
-    val displayConfig: StateFlow<MeshProtos.Config.DisplayConfig?> = _displayConfig.asStateFlow()
+    override val displayConfig: StateFlow<MeshProtos.Config.DisplayConfig?> = _displayConfig.asStateFlow()
 
     private val _bluetoothConfig = MutableStateFlow<MeshProtos.Config.BluetoothConfig?>(null)
-    val bluetoothConfig: StateFlow<MeshProtos.Config.BluetoothConfig?> = _bluetoothConfig.asStateFlow()
+    override val bluetoothConfig: StateFlow<MeshProtos.Config.BluetoothConfig?> = _bluetoothConfig.asStateFlow()
 
     private val _channels = MutableStateFlow<List<MeshProtos.Channel>>(emptyList())
-    val channels: StateFlow<List<MeshProtos.Channel>> = _channels.asStateFlow()
+    override val channels: StateFlow<List<MeshProtos.Channel>> = _channels.asStateFlow()
 
     private val _owner = MutableStateFlow<MeshProtos.User?>(null)
-    val owner: StateFlow<MeshProtos.User?> = _owner.asStateFlow()
+    override val owner: StateFlow<MeshProtos.User?> = _owner.asStateFlow()
 
     private val _moduleConfigs = MutableStateFlow<Map<String, MeshProtos.ModuleConfig>>(emptyMap())
-    val moduleConfigs: StateFlow<Map<String, MeshProtos.ModuleConfig>> = _moduleConfigs.asStateFlow()
+    override val moduleConfigs: StateFlow<Map<String, MeshProtos.ModuleConfig>> = _moduleConfigs.asStateFlow()
 
     private val _configComplete = MutableSharedFlow<Int>(extraBufferCapacity = 8)
-    val configComplete: SharedFlow<Int> = _configComplete.asSharedFlow()
+    override val configComplete: SharedFlow<Int> = _configComplete.asSharedFlow()
 
     private val nodeMap = mutableMapOf<Int, MeshNode>()
 
     @Volatile private var configBurstInProgress = false
 
-    val isConnected: Boolean
+    override val isConnected: Boolean
         get() = _connectionState.value == "CONNECTED" || _connectionState.value == "CONNECTING"
 
     init {
@@ -412,13 +414,18 @@ class MeshServiceManager(private val context: Context) {
 
     // ==========  BLE SCANNING  ==========
 
-    fun startScan() = deviceDiscovery.startBleScan()
-    fun stopScan() = deviceDiscovery.stopBleScan()
+    override fun startScan() {
+        deviceDiscovery.startBleScan()
+    }
+
+    override fun stopScan() {
+        deviceDiscovery.stopBleScan()
+    }
 
     // ==========  BLE CONNECTION  ==========
 
     @SuppressLint("MissingPermission")
-    fun connect(device: BluetoothDevice) {
+    override fun connect(device: BluetoothDevice) {
         stopScan()
         _connectionState.value = "CONNECTING"
         _activeTransport.value = TransportType.BLE
@@ -436,7 +443,7 @@ class MeshServiceManager(private val context: Context) {
         }
     }
 
-    fun disconnect() {
+    override fun disconnect() {
         runCatching { rustSession?.close() }
         rustSession = null
         if (usbActive) usbTransport.disconnect()
@@ -447,7 +454,7 @@ class MeshServiceManager(private val context: Context) {
 
     fun unbind() = disconnect()
 
-    fun destroy() {
+    override fun destroy() {
         disconnect()
         usbTransport.destroy()
         deviceDiscovery.destroy()
@@ -461,12 +468,12 @@ class MeshServiceManager(private val context: Context) {
      * `voiceSender()` is cheap to re-invoke. Returns null until connected,
      * to mirror the explicit `isConnected` check the rest of this class uses.
      */
-    fun voiceSender(): uniffi.voicetastic.VoiceSender? =
+    override fun voiceSender(): uniffi.voicetastic.VoiceSender? =
         if (isConnected) runCatching { rustService.voiceSender() }.getOrNull() else null
 
     // ==========  MESHTASTIC PROTOCOL  ==========
 
-    fun refreshConfig() {
+    override fun refreshConfig() {
         if (!isConnected) return
         runCatching { rustService.refreshConfig() }
             .onFailure { Log.e(TAG, "refreshConfig failed", it) }
@@ -491,7 +498,7 @@ class MeshServiceManager(private val context: Context) {
      * Holds [isNodeScanInProgress] true for ~10 s so the UI can show a
      * spinner and so peers have time to reply.
      */
-    fun requestNodeInfo(): Boolean {
+    override fun requestNodeInfo(): Boolean {
         if (!isConnected) {
             Log.w(TAG, "requestNodeInfo: not connected")
             return false
@@ -582,7 +589,7 @@ class MeshServiceManager(private val context: Context) {
 
     // ==========  SENDING  ==========
 
-    fun sendText(text: String, destination: String? = null, channel: Int = 0): Boolean {
+    override fun sendText(text: String, destination: String?, channel: Int): Boolean {
         if (!isConnected) {
             Log.w(TAG, "sendText dropped: not connected (state=${_connectionState.value}, transport=${_activeTransport.value})")
             return false
@@ -621,13 +628,13 @@ class MeshServiceManager(private val context: Context) {
      *   ACK-driven. Set to true only when the caller genuinely needs
      *   delivery confirmation (e.g. user-visible text or admin ops).
      */
-    fun sendData(
+    override fun sendData(
         data: ByteArray,
         portNum: Int,
-        destination: String? = null,
-        channel: Int = 0,
-        wantAck: Boolean = false,
-        wantResponse: Boolean = false,
+        destination: String?,
+        channel: Int,
+        wantAck: Boolean,
+        wantResponse: Boolean,
     ): Boolean {
         if (!isConnected) {
             Log.w(TAG, "sendData dropped: not connected (state=${_connectionState.value}, transport=${_activeTransport.value})")
@@ -665,56 +672,56 @@ class MeshServiceManager(private val context: Context) {
         }
     }
 
-    fun writeConfig(config: MeshProtos.Config): Boolean {
+    override fun writeConfig(config: MeshProtos.Config): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setSetConfig(config)
             .build()
         return sendAdminMessage(admin)
     }
 
-    fun writeModuleConfig(moduleConfig: MeshProtos.ModuleConfig): Boolean {
+    override fun writeModuleConfig(moduleConfig: MeshProtos.ModuleConfig): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setSetModuleConfig(moduleConfig)
             .build()
         return sendAdminMessage(admin)
     }
 
-    fun setFixedPosition(position: MeshProtos.Position): Boolean {
+    override fun setFixedPosition(position: MeshProtos.Position): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setSetFixedPosition(position)
             .build()
         return sendAdminMessage(admin)
     }
 
-    fun removeFixedPosition(): Boolean {
+    override fun removeFixedPosition(): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setRemoveFixedPosition(true)
             .build()
         return sendAdminMessage(admin)
     }
 
-    fun writeChannel(channel: MeshProtos.Channel): Boolean {
+    override fun writeChannel(channel: MeshProtos.Channel): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setSetChannel(channel)
             .build()
         return sendAdminMessage(admin)
     }
 
-    fun writeOwner(user: MeshProtos.User): Boolean {
+    override fun writeOwner(user: MeshProtos.User): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setSetOwner(user)
             .build()
         return sendAdminMessage(admin)
     }
 
-    fun rebootDevice(seconds: Int = 5): Boolean {
+    override fun rebootDevice(seconds: Int): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setRebootSeconds(seconds)
             .build()
         return sendAdminMessage(admin)
     }
 
-    fun factoryReset(): Boolean {
+    override fun factoryReset(): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setFactoryResetConfig(1)
             .build()
