@@ -384,3 +384,58 @@ assemble-release:
       when: manual
       allow_failure: true
 
+# ----------------------------------------------------------------------------
+# Stage: package — publish the signed APK as a GitLab Release asset.
+#
+# Uploads the APK from `assemble-release` to the project's Generic Package
+# Registry (no expiry, unlike job artifacts) and creates a Release tied to
+# the tag, with the package linked as a download with a stable `filepath`.
+#
+# Stable URLs the site can embed (work without auth iff project is public):
+#   - Always-latest:
+#       $CI_SERVER_URL/$CI_PROJECT_PATH/-/releases/permalink/latest/downloads/voicetastic.apk
+#   - Pinned version:
+#       $CI_SERVER_URL/$CI_PROJECT_PATH/-/releases/v1.2.3/downloads/voicetastic.apk
+#
+# Only runs on tag pipelines — i.e. after the `release-tag` bot (or a manual
+# tag push) has produced a `vX.Y.Z` ref.
+# ----------------------------------------------------------------------------
+publish-release:
+  stage: package
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: '$CI_COMMIT_TAG'
+  needs:
+    - job: assemble-release
+      artifacts: true
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
+  script:
+    - |
+      set -eu
+      APK=$(ls app/build/outputs/apk/release/*.apk | head -n1)
+      if [ -z "$APK" ]; then
+        echo "No APK found in app/build/outputs/apk/release/"; exit 1
+      fi
+      PKG_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/voicetastic/${CI_COMMIT_TAG}/voicetastic.apk"
+      echo "Uploading $APK → $PKG_URL"
+      # `--upload-file` does a PUT, which is what the generic registry expects.
+      apk add --no-cache curl > /dev/null
+      curl --fail --silent --show-error \
+        --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+        --upload-file "$APK" \
+        "$PKG_URL"
+      echo "Upload OK."
+  release:
+    tag_name: '$CI_COMMIT_TAG'
+    name: 'Voicetastic $CI_COMMIT_TAG'
+    description: 'Voicetastic Android $CI_COMMIT_TAG (commit $CI_COMMIT_SHORT_SHA)'
+    assets:
+      links:
+        # `filepath` is what makes the /releases/.../downloads/<filepath>
+        # permalink work. Keep it short and stable.
+        - name: 'voicetastic.apk'
+          url: '$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/voicetastic/$CI_COMMIT_TAG/voicetastic.apk'
+          filepath: '/voicetastic.apk'
+          link_type: 'package'
+
