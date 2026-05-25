@@ -52,6 +52,7 @@
 stages:
   - test
   - build
+  - release   # auto-bump semver tag from conventional commits
   - package
 
 variables:
@@ -252,6 +253,90 @@ assemble-debug:
     expire_in: 4 weeks
 
 # ----------------------------------------------------------------------------
+# Stage: release — auto-bump semver from conventional commits.
+#
+# Runs on main only. Scans commits since the latest `vX.Y.Z` tag and decides:
+#   - any `<type>!:` or `BREAKING CHANGE:` footer → major
+#   - any `feat:`                                → minor
+#   - any `fix:`                                 → patch
+#   - nothing matching                           → no tag, job exits 0
+#
+# When it bumps, it pushes `vX.Y.Z` back to the repo, which triggers a fresh
+# tag pipeline. That tag pipeline runs `assemble-release` automatically and
+# the APK ships with `versionName=X.Y.Z` (and `versionCode=$CI_PIPELINE_IID`).
+#
+# Setup (one time):
+#   1. Settings → Access Tokens → create a project access token
+#      - Role: Maintainer (needed to push tags to a protected ref)
+#      - Scope: `write_repository`
+#   2. Settings → CI/CD → Variables → add `CI_PUSH_TOKEN` (masked, protected)
+#      with the token value.
+#   3. Settings → Repository → Protected tags → allow `v*` for Maintainers
+#      (or the role of the bot user) so the push isn't rejected.
+#
+# Without `$CI_PUSH_TOKEN` the rule below skips the job — pipelines still pass.
+# ----------------------------------------------------------------------------
+release-tag:
+  stage: release
+  image: alpine:3.20
+  needs:
+    - job: unit-tests
+      artifacts: false
+    - job: assemble-debug
+      artifacts: false
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PUSH_TOKEN'
+      when: on_success
+  # Need full history to `git log <last-tag>..HEAD`.
+  variables:
+    GIT_DEPTH: "0"
+    GIT_SUBMODULE_STRATEGY: none
+  before_script:
+    - apk add --no-cache git
+  script:
+    - |
+      set -eu
+      git config user.email "ci@${CI_SERVER_HOST}"
+      git config user.name "GitLab Release Bot"
+      git fetch --tags --quiet
+
+      LAST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+      LAST=${LAST:-v0.0.0}
+      VER=${LAST#v}
+      MAJ=$(echo "$VER" | cut -d. -f1)
+      MIN=$(echo "$VER" | cut -d. -f2)
+      PAT=$(echo "$VER" | cut -d. -f3)
+
+      if [ "$LAST" = "v0.0.0" ]; then RANGE="HEAD"; else RANGE="${LAST}..HEAD"; fi
+
+      MSGS=$(git log "$RANGE" --pretty=format:'%s%n%b%n---END---')
+      BUMP=none
+      # Precedence: major > minor > patch. Scan once, take the highest.
+      if echo "$MSGS" | grep -qE '^[a-z]+(\([^)]+\))?!:|^BREAKING CHANGE:'; then
+        BUMP=major
+      elif echo "$MSGS" | grep -qE '^feat(\([^)]+\))?:'; then
+        BUMP=minor
+      elif echo "$MSGS" | grep -qE '^fix(\([^)]+\))?:'; then
+        BUMP=patch
+      fi
+
+      if [ "$BUMP" = none ]; then
+        echo "No releasable commits since $LAST. Skipping."
+        exit 0
+      fi
+
+      case "$BUMP" in
+        major) MAJ=$((MAJ+1)); MIN=0; PAT=0 ;;
+        minor) MIN=$((MIN+1)); PAT=0 ;;
+        patch) PAT=$((PAT+1)) ;;
+      esac
+      NEW="v${MAJ}.${MIN}.${PAT}"
+      echo "Bump $BUMP: $LAST → $NEW"
+
+      git tag -a "$NEW" -m "Release $NEW (auto, $BUMP bump from $LAST)"
+      git push "https://oauth2:${CI_PUSH_TOKEN}@${CI_SERVER_HOST}/${CI_PROJECT_PATH}.git" "$NEW"
+
+# ----------------------------------------------------------------------------
 # Stage: package — release APK (only on tags / main branch)
 # ----------------------------------------------------------------------------
 assemble-release:
@@ -286,8 +371,71 @@ assemble-release:
       - app/build/outputs/apk/release/*.apk
     expire_in: 12 weeks
   rules:
+    # Auto: tag push (`v1.2.3`). Version comes from `$CI_COMMIT_TAG`.
     - if: '$CI_COMMIT_TAG'
+    # Manual via "Run pipeline" form with RELEASE_VERSION=1.2.3 set.
+    # Runs on any ref so you can cut a release from a hotfix branch too.
+    - if: '$RELEASE_VERSION'
+      when: manual
+      allow_failure: true
+    # Manual play button on main pipelines (smoke test only — no semver,
+    # APK will be tagged 0.0.0 / code 1).
     - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
       when: manual
       allow_failure: true
+
+# ----------------------------------------------------------------------------
+# Stage: package — publish the signed APK as a GitLab Release asset.
+#
+# Uploads the APK from `assemble-release` to the project's Generic Package
+# Registry (no expiry, unlike job artifacts) and creates a Release tied to
+# the tag, with the package linked as a download with a stable `filepath`.
+#
+# Stable URLs the site can embed (work without auth iff project is public):
+#   - Always-latest:
+#       $CI_SERVER_URL/$CI_PROJECT_PATH/-/releases/permalink/latest/downloads/voicetastic.apk
+#   - Pinned version:
+#       $CI_SERVER_URL/$CI_PROJECT_PATH/-/releases/v1.2.3/downloads/voicetastic.apk
+#
+# Only runs on tag pipelines — i.e. after the `release-tag` bot (or a manual
+# tag push) has produced a `vX.Y.Z` ref.
+# ----------------------------------------------------------------------------
+publish-release:
+  stage: package
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  rules:
+    - if: '$CI_COMMIT_TAG'
+  needs:
+    - job: assemble-release
+      artifacts: true
+  variables:
+    GIT_SUBMODULE_STRATEGY: none
+  script:
+    - |
+      set -eu
+      APK=$(ls app/build/outputs/apk/release/*.apk | head -n1)
+      if [ -z "$APK" ]; then
+        echo "No APK found in app/build/outputs/apk/release/"; exit 1
+      fi
+      PKG_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/voicetastic/${CI_COMMIT_TAG}/voicetastic.apk"
+      echo "Uploading $APK → $PKG_URL"
+      # `--upload-file` does a PUT, which is what the generic registry expects.
+      apk add --no-cache curl > /dev/null
+      curl --fail --silent --show-error \
+        --header "JOB-TOKEN: $CI_JOB_TOKEN" \
+        --upload-file "$APK" \
+        "$PKG_URL"
+      echo "Upload OK."
+  release:
+    tag_name: '$CI_COMMIT_TAG'
+    name: 'Voicetastic $CI_COMMIT_TAG'
+    description: 'Voicetastic Android $CI_COMMIT_TAG (commit $CI_COMMIT_SHORT_SHA)'
+    assets:
+      links:
+        # `filepath` is what makes the /releases/.../downloads/<filepath>
+        # permalink work. Keep it short and stable.
+        - name: 'voicetastic.apk'
+          url: '$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/voicetastic/$CI_COMMIT_TAG/voicetastic.apk'
+          filepath: '/voicetastic.apk'
+          link_type: 'package'
 
