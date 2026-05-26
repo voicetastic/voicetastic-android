@@ -236,7 +236,9 @@ unit-tests:
     expire_in: 1 week
 
 # ----------------------------------------------------------------------------
-# Stage: build — debug APK (always built, on every branch and MR)
+# Stage: build — debug APK (every branch and MR, but NOT on tag pipelines —
+# tags only need the release APK, and skipping debug here saves ~one Gradle
+# run per release).
 # ----------------------------------------------------------------------------
 assemble-debug:
   stage: build
@@ -244,6 +246,12 @@ assemble-debug:
   needs:
     - job: unit-tests
       artifacts: false
+  rules:
+    # Tag pipelines go straight to assemble-release → publish-release;
+    # debug builds are dead weight there.
+    - if: '$CI_COMMIT_TAG'
+      when: never
+    - when: on_success
   script:
     - ./gradlew --no-daemon :app:assembleDebug
   artifacts:
