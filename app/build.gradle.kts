@@ -206,12 +206,28 @@ android {
         }
     }
 
+    // `versionName` is human-facing semver. Source order:
+    //   1. `$CI_COMMIT_TAG`     — tag pipelines (auto path, set by the
+    //                             `release-tag` job below)
+    //   2. `$RELEASE_VERSION`   — "Run pipeline" form override (manual UI path)
+    //   3. fallback `0.0.0`     — local/debug builds
+    val semver = run {
+        val raw = (System.getenv("CI_COMMIT_TAG").orEmpty().ifBlank {
+            System.getenv("RELEASE_VERSION").orEmpty()
+        }).removePrefix("v")
+        if (raw.matches(Regex("""\d+\.\d+\.\d+"""))) raw else "0.0.0"
+    }
+
     defaultConfig {
         applicationId = "re.chasam.voicetastic"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        // `versionCode` must monotonically increase for Play. `$CI_PIPELINE_IID`
+        // is a per-project counter that ticks once per pipeline, so it's
+        // always > the previous build's code regardless of which branch /
+        // tag triggered it. Falls back to 1 for untagged local builds.
+        versionCode = System.getenv("CI_PIPELINE_IID")?.toIntOrNull() ?: 1
+        versionName = semver
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
