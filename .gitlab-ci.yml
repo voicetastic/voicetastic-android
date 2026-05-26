@@ -100,6 +100,31 @@ variables:
   ARTIFACT_COMPRESSION_LEVEL: "fast"
   CACHE_COMPRESSION_LEVEL: "fast"
 
+# ---------------------------------------------------------------------------
+# Pipeline creation rules.
+#
+# Without this block GitLab can create BOTH a branch pipeline AND a
+# merge_request_event pipeline for the same commit (wasted runs), AND jobs
+# that don't have explicit MR-event rules are silently excluded from MR
+# pipelines — that's how `lint` and `unit-tests` disappeared from MR
+# validation, leaving `assemble-debug` to run alone and fail its
+# needs:unit-tests check.
+#
+# The order below means:
+#   1. MR pipelines run when an MR is open (full validation).
+#   2. Tag pipelines run on `vX.Y.Z` pushes (release path).
+#   3. Branch pipelines are SUPPRESSED on branches that already have an
+#      open MR — the MR pipeline above is the one that matters.
+#   4. Branch pipelines run otherwise (main + branches without MRs).
+# ---------------------------------------------------------------------------
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
 # Cancel superseded pipelines (e.g. when force-pushing to an MR branch).
 # NOTE: cancellation appears in job logs as `exit code 137` (SIGKILL),
 # indistinguishable from a kernel OOM kill or the runner timeout described
@@ -244,13 +269,8 @@ assemble-debug:
   stage: build
   <<: [*android-setup, *cache-ro]
   needs:
-    # `optional: true` is required because GitLab's needs-graph validator
-    # still inspects this `needs:` block when the job is excluded by the
-    # rules below (tag pipelines). Without it the validator fails with
-    # "unit-tests does not exist in the pipeline".
     - job: unit-tests
       artifacts: false
-      optional: true
   rules:
     # Tag pipelines go straight to assemble-release → publish-release;
     # debug builds are dead weight there.
