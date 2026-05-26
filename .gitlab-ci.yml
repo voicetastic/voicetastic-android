@@ -244,8 +244,13 @@ assemble-debug:
   stage: build
   <<: [*android-setup, *cache-ro]
   needs:
+    # `optional: true` is required because GitLab's needs-graph validator
+    # still inspects this `needs:` block when the job is excluded by the
+    # rules below (tag pipelines). Without it the validator fails with
+    # "unit-tests does not exist in the pipeline".
     - job: unit-tests
       artifacts: false
+      optional: true
   rules:
     # Tag pipelines go straight to assemble-release → publish-release;
     # debug builds are dead weight there.
