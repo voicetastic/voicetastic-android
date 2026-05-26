@@ -43,11 +43,16 @@
 # ---------------------------------------------------------------------------
 #
 # Optional CI/CD variables for signing the release APK (set as protected/masked):
-#   ANDROID_KEYSTORE_BASE64  – base64-encoded keystore (.jks/.keystore)
-#   ANDROID_KEYSTORE_PASSWORD
-#   ANDROID_KEY_ALIAS
-#   ANDROID_KEY_PASSWORD
-# If any of those are missing, the release job still runs but produces an unsigned APK.
+#   ANDROID_KEYSTORE_BASE64    – base64-encoded keystore (.jks/.keystore)
+#   ANDROID_KEYSTORE_PASSWORD  – keystore password
+#   ANDROID_KEY_ALIAS          – key alias inside the keystore
+#   ANDROID_KEY_PASSWORD       – OPTIONAL; defaults to ANDROID_KEYSTORE_PASSWORD
+#                                if unset. Most `keytool -genkey` workflows
+#                                end up with these matching (Enter at the
+#                                "Enter key password (RETURN if same as
+#                                keystore password)" prompt).
+# If KEYSTORE_BASE64 / KEYSTORE_PASSWORD / KEY_ALIAS are missing the release
+# job still runs but produces an unsigned APK.
 
 stages:
   - test
@@ -386,13 +391,16 @@ assemble-release:
   script:
     - |
       if [ -n "$ANDROID_KEYSTORE_BASE64" ] && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] \
-         && [ -n "$ANDROID_KEY_ALIAS" ] && [ -n "$ANDROID_KEY_PASSWORD" ]; then
+         && [ -n "$ANDROID_KEY_ALIAS" ]; then
         echo "Signing keystore detected — building signed release APK."
         echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$CI_PROJECT_DIR/release.keystore"
         export RELEASE_STORE_FILE="$CI_PROJECT_DIR/release.keystore"
         export RELEASE_STORE_PASSWORD="$ANDROID_KEYSTORE_PASSWORD"
         export RELEASE_KEY_ALIAS="$ANDROID_KEY_ALIAS"
-        export RELEASE_KEY_PASSWORD="$ANDROID_KEY_PASSWORD"
+        # Key password defaults to the keystore password when not set —
+        # this is what `keytool` produces when you press Enter at the
+        # "RETURN if same as keystore password" prompt.
+        export RELEASE_KEY_PASSWORD="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
       else
         echo "No signing credentials provided — release APK will be unsigned."
       fi
