@@ -100,6 +100,31 @@ variables:
   ARTIFACT_COMPRESSION_LEVEL: "fast"
   CACHE_COMPRESSION_LEVEL: "fast"
 
+# ---------------------------------------------------------------------------
+# Pipeline creation rules.
+#
+# Without this block GitLab can create BOTH a branch pipeline AND a
+# merge_request_event pipeline for the same commit (wasted runs), AND jobs
+# that don't have explicit MR-event rules are silently excluded from MR
+# pipelines — that's how `lint` and `unit-tests` disappeared from MR
+# validation, leaving `assemble-debug` to run alone and fail its
+# needs:unit-tests check.
+#
+# The order below means:
+#   1. MR pipelines run when an MR is open (full validation).
+#   2. Tag pipelines run on `vX.Y.Z` pushes (release path).
+#   3. Branch pipelines are SUPPRESSED on branches that already have an
+#      open MR — the MR pipeline above is the one that matters.
+#   4. Branch pipelines run otherwise (main + branches without MRs).
+# ---------------------------------------------------------------------------
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_TAG
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never
+    - if: $CI_COMMIT_BRANCH
+
 # Cancel superseded pipelines (e.g. when force-pushing to an MR branch).
 # NOTE: cancellation appears in job logs as `exit code 137` (SIGKILL),
 # indistinguishable from a kernel OOM kill or the runner timeout described
@@ -236,7 +261,9 @@ unit-tests:
     expire_in: 1 week
 
 # ----------------------------------------------------------------------------
-# Stage: build — debug APK (always built, on every branch and MR)
+# Stage: build — debug APK (every branch and MR, but NOT on tag pipelines —
+# tags only need the release APK, and skipping debug here saves ~one Gradle
+# run per release).
 # ----------------------------------------------------------------------------
 assemble-debug:
   stage: build
@@ -244,6 +271,12 @@ assemble-debug:
   needs:
     - job: unit-tests
       artifacts: false
+  rules:
+    # Tag pipelines go straight to assemble-release → publish-release;
+    # debug builds are dead weight there.
+    - if: '$CI_COMMIT_TAG'
+      when: never
+    - when: on_success
   script:
     - ./gradlew --no-daemon :app:assembleDebug
   artifacts:
@@ -410,7 +443,10 @@ publish-release:
       artifacts: true
   variables:
     GIT_SUBMODULE_STRATEGY: none
+    # Full history so `git log <prev-tag>..<current-tag>` works.
+    GIT_DEPTH: "0"
   script:
+    - apk add --no-cache curl git > /dev/null
     - |
       set -eu
       APK=$(ls app/build/outputs/apk/release/*.apk | head -n1)
@@ -420,22 +456,66 @@ publish-release:
       PKG_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/voicetastic/${CI_COMMIT_TAG}/voicetastic.apk"
       echo "Uploading $APK → $PKG_URL"
       # `--upload-file` does a PUT, which is what the generic registry expects.
-      apk add --no-cache curl > /dev/null
       curl --fail --silent --show-error \
         --header "JOB-TOKEN: $CI_JOB_TOKEN" \
         --upload-file "$APK" \
         "$PKG_URL"
       echo "Upload OK."
-  release:
-    tag_name: '$CI_COMMIT_TAG'
-    name: 'Voicetastic $CI_COMMIT_TAG'
-    description: 'Voicetastic Android $CI_COMMIT_TAG (commit $CI_COMMIT_SHORT_SHA)'
-    assets:
-      links:
-        # `filepath` is what makes the /releases/.../downloads/<filepath>
-        # permalink work. Keep it short and stable.
-        - name: 'voicetastic.apk'
-          url: '$CI_API_V4_URL/projects/$CI_PROJECT_ID/packages/generic/voicetastic/$CI_COMMIT_TAG/voicetastic.apk'
-          filepath: '/voicetastic.apk'
-          link_type: 'package'
+    - |
+      set -eu
+      # ---- Generate release notes from conventional commits ----
+      # Range: previous semver tag (highest, excluding current) → current tag.
+      # No previous tag → log from the very first commit.
+      git fetch --tags --quiet
+      PREV=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
+             | grep -v "^${CI_COMMIT_TAG}\$" | head -n1 || true)
+      RANGE="${PREV:+${PREV}..}${CI_COMMIT_TAG}"
+      echo "Generating notes for range: ${RANGE}"
+
+      # Emit a markdown section IF the grep pattern matches any commit subjects
+      # in $RANGE. Title becomes the H3; matching `<short-sha> <subject>` lines
+      # become bullets.
+      section() {
+        title=$1; pat=$2
+        lines=$(git log "$RANGE" --no-merges --pretty=format:'%h %s' \
+                | grep -E "$pat" || true)
+        [ -z "$lines" ] && return 0
+        printf '\n### %s\n\n' "$title"
+        echo "$lines" | sed 's/^/- /'
+      }
+
+      {
+        if [ -n "$PREV" ]; then
+          echo "Changes since [\`$PREV\`]($CI_PROJECT_URL/-/releases/$PREV)."
+        else
+          echo "First release."
+        fi
+        # Order matters — readers care about breakage first.
+        # `feat:` / `fix:` patterns end with `:` (not `!:`), so a `feat!:`
+        # commit lands in Breaking only, not also in Features.
+        section "Breaking changes" '^[a-z]+(\([^)]+\))?!:'
+        section "Features"         '^feat(\([^)]+\))?:'
+        section "Fixes"            '^fix(\([^)]+\))?:'
+        section "Performance"      '^perf(\([^)]+\))?:'
+        section "Refactoring"      '^refactor(\([^)]+\))?:'
+        if [ -n "$PREV" ]; then
+          printf '\n**Full diff:** %s/-/compare/%s...%s\n' \
+            "$CI_PROJECT_URL" "$PREV" "$CI_COMMIT_TAG"
+        fi
+      } > release-notes.md
+
+      echo "--- release-notes.md ---"
+      cat release-notes.md
+      echo "--- end notes ---"
+    - |
+      set -eu
+      PKG_URL="${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/voicetastic/${CI_COMMIT_TAG}/voicetastic.apk"
+      # Create the Release via release-cli (called explicitly, not via the
+      # `release:` YAML keyword, because we need a multi-line description
+      # read from a file).
+      release-cli create \
+        --tag-name   "$CI_COMMIT_TAG" \
+        --name       "Voicetastic $CI_COMMIT_TAG" \
+        --description "$(cat release-notes.md)" \
+        --assets-link "{\"name\":\"voicetastic.apk\",\"url\":\"$PKG_URL\",\"filepath\":\"/voicetastic.apk\",\"link_type\":\"package\"}"
 
