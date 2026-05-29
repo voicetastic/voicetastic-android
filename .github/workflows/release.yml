@@ -1,0 +1,206 @@
+# Release workflow — fires on `vX.Y.Z` tag push. Mirrors the GitLab CI
+# `assemble-release` + `publish-release` jobs (see .gitlab-ci.yml):
+#
+#   1. lint + unit tests as the quality gate
+#   2. assembleRelease (signed if the keystore secrets are set; unsigned
+#      otherwise — the Gradle config in app/build.gradle.kts gates the
+#      `release` signingConfig on the env vars being present)
+#   3. generate release notes from conventional commits since the
+#      previous semver tag
+#   4. create a GitHub Release with the APK attached
+#
+# Secrets the signed-APK path needs (Settings → Secrets and variables →
+# Actions). All four optional — missing any => unsigned APK, same as
+# GitLab.
+#   ANDROID_KEYSTORE_BASE64   base64-encoded .jks/.keystore
+#   ANDROID_KEYSTORE_PASSWORD keystore password
+#   ANDROID_KEY_ALIAS         alias inside the keystore
+#   ANDROID_KEY_PASSWORD      optional; defaults to KEYSTORE_PASSWORD
+#                             if unset (matches `keytool -genkey` happy path)
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write  # required to create the Release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_COMPILE_SDK: "36"
+      ANDROID_BUILD_TOOLS: "36.0.0"
+      ANDROID_NDK_VERSION: "27.0.12077973"
+      GRADLE_OPTS: >-
+        -Dorg.gradle.daemon=false
+        -Dorg.gradle.jvmargs=-Xmx3g
+        -XX:MaxMetaspaceSize=512m
+        -XX:+ExitOnOutOfMemoryError
+        -Dkotlin.compiler.execution.strategy=in-process
+      PROTOC_INCLUDE: "/usr/include"
+    steps:
+      - name: Checkout (full history + submodules)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # release-notes need `git log <prev-tag>..HEAD`
+          submodules: recursive   # voicetastic-desktop is a submodule
+
+      - name: Install protobuf-compiler + libprotobuf-dev
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            protobuf-compiler libprotobuf-dev
+
+      - name: Set up JDK 21 (Temurin)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK + accept licences
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-${{ env.ANDROID_COMPILE_SDK }} build-tools;${{ env.ANDROID_BUILD_TOOLS }}'
+
+      - name: Install Android NDK ${{ env.ANDROID_NDK_VERSION }}
+        run: |
+          sdkmanager --install "ndk;${ANDROID_NDK_VERSION}" > /dev/null
+          echo "ANDROID_NDK_HOME=${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Set up Rust stable + Android targets
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+
+      - name: Cache Gradle + Cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.cargo/registry
+            ~/.cargo/git
+            third_party/voicetastic-desktop/target-android
+          key: gradle-cargo-${{ hashFiles('gradle/libs.versions.toml', 'third_party/voicetastic-desktop/Cargo.lock') }}
+          restore-keys: |
+            gradle-cargo-
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Lint (Android lint, debug variant)
+        run: ./gradlew --no-daemon :app:lintDebug
+
+      - name: Unit tests
+        run: ./gradlew --no-daemon :app:testDebugUnitTest
+
+      - name: Decode signing keystore (if configured)
+        id: keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        run: |
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ] \
+             && [ -n "$ANDROID_KEYSTORE_PASSWORD" ] \
+             && [ -n "$ANDROID_KEY_ALIAS" ]; then
+            echo "Signing keystore detected — building signed release APK."
+            echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/release.keystore"
+            echo "RELEASE_STORE_FILE=$RUNNER_TEMP/release.keystore" >> "$GITHUB_ENV"
+            echo "RELEASE_STORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "RELEASE_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "::add-mask::$ANDROID_KEYSTORE_PASSWORD"
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No signing credentials provided — release APK will be unsigned."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set RELEASE_KEY_PASSWORD (defaults to KEYSTORE_PASSWORD)
+        if: steps.keystore.outputs.signed == 'true'
+        env:
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          PASS="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+          echo "RELEASE_KEY_PASSWORD=$PASS" >> "$GITHUB_ENV"
+          echo "::add-mask::$PASS"
+
+      - name: Assemble release APK
+        run: ./gradlew --no-daemon :app:assembleRelease
+
+      - name: Wipe keystore from runner
+        if: always()
+        run: rm -f "$RUNNER_TEMP/release.keystore"
+
+      - name: Locate built APK
+        id: apk
+        run: |
+          APK=$(ls app/build/outputs/apk/release/*.apk | head -n1)
+          if [ -z "$APK" ]; then
+            echo "::error::No APK produced in app/build/outputs/apk/release/"
+            exit 1
+          fi
+          # Rename to a stable filename so the asset URL is predictable.
+          STABLE="$RUNNER_TEMP/voicetastic.apk"
+          cp "$APK" "$STABLE"
+          echo "path=$STABLE" >> "$GITHUB_OUTPUT"
+          echo "Built: $APK ($(du -h "$APK" | cut -f1))"
+
+      - name: Generate release notes from conventional commits
+        id: notes
+        env:
+          TAG: ${{ github.ref_name }}
+          REPO_URL: ${{ github.server_url }}/${{ github.repository }}
+        run: |
+          set -eu
+          # Range: previous semver tag (highest, excluding current) → HEAD.
+          PREV=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname \
+                 | grep -v "^${TAG}$" | head -n1 || true)
+          RANGE="${PREV:+${PREV}..}${TAG}"
+          echo "Generating notes for range: ${RANGE}"
+
+          section() {
+            title=$1; pat=$2
+            lines=$(git log "$RANGE" --no-merges --pretty=format:'%h %s' \
+                    | grep -E "$pat" || true)
+            [ -z "$lines" ] && return 0
+            printf '\n### %s\n\n' "$title"
+            echo "$lines" | sed 's/^/- /'
+          }
+
+          NOTES="$RUNNER_TEMP/release-notes.md"
+          {
+            if [ -n "$PREV" ]; then
+              echo "Changes since [\`$PREV\`]($REPO_URL/releases/tag/$PREV)."
+            else
+              echo "First release."
+            fi
+            section "Breaking changes" '^[a-z]+(\([^)]+\))?!:'
+            section "Features"         '^feat(\([^)]+\))?:'
+            section "Fixes"            '^fix(\([^)]+\))?:'
+            section "Performance"      '^perf(\([^)]+\))?:'
+            section "Refactoring"      '^refactor(\([^)]+\))?:'
+            if [ -n "$PREV" ]; then
+              printf '\n**Full diff:** %s/compare/%s...%s\n' \
+                "$REPO_URL" "$PREV" "$TAG"
+            fi
+          } > "$NOTES"
+
+          echo "path=$NOTES" >> "$GITHUB_OUTPUT"
+          echo "--- release-notes.md ---"
+          cat "$NOTES"
+          echo "--- end notes ---"
+
+      - name: Create GitHub Release + attach APK
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Voicetastic ${{ github.ref_name }}
+          body_path: ${{ steps.notes.outputs.path }}
+          files: ${{ steps.apk.outputs.path }}
+          fail_on_unmatched_files: true

@@ -1,0 +1,105 @@
+# Auto-bump semver tag from conventional commits — ports the
+# `release-tag` job from .gitlab-ci.yml.
+#
+# Runs on every push to master. Scans commits since the latest
+# `vX.Y.Z` tag and picks a bump:
+#   - `<type>!:` or `BREAKING CHANGE:` footer → major
+#   - `feat:`                                → minor
+#   - `fix:`                                 → patch
+#   - nothing matching                       → no tag, exit 0
+#
+# When it bumps, it pushes the new tag to GitHub. The push fires
+# the `release.yml` workflow, which builds + publishes the APK.
+#
+# `permissions: contents: write` + the default GITHUB_TOKEN are
+# enough to push a tag (no PAT needed, unlike GitLab's $CI_PUSH_TOKEN).
+
+name: auto-bump
+
+on:
+  push:
+    branches:
+      - master
+
+permissions:
+  contents: write
+
+# Serialise: two pushes landing back-to-back would otherwise race
+# to compute "latest tag" and could pick the same number.
+concurrency:
+  group: auto-bump
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    # Skip the bot's own commits — defensive even though we don't
+    # push commits, only tags.
+    if: github.actor != 'github-actions[bot]'
+    steps:
+      - name: Checkout (full history + tags)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+      - name: Compute next semver from conventional commits
+        id: bump
+        run: |
+          set -eu
+          git fetch --tags --quiet
+
+          LAST=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | head -n1)
+          LAST=${LAST:-v0.0.0}
+          VER=${LAST#v}
+          MAJ=$(echo "$VER" | cut -d. -f1)
+          MIN=$(echo "$VER" | cut -d. -f2)
+          PAT=$(echo "$VER" | cut -d. -f3)
+
+          if [ "$LAST" = "v0.0.0" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${LAST}..HEAD"
+          fi
+          MSGS=$(git log "$RANGE" --pretty=format:'%s%n%b%n---END---')
+
+          BUMP=none
+          # Precedence: major > minor > patch. Scan once, take highest.
+          if echo "$MSGS" | grep -qE '^[a-z]+(\([^)]+\))?!:|^BREAKING CHANGE:'; then
+            BUMP=major
+          elif echo "$MSGS" | grep -qE '^feat(\([^)]+\))?:'; then
+            BUMP=minor
+          elif echo "$MSGS" | grep -qE '^fix(\([^)]+\))?:'; then
+            BUMP=patch
+          fi
+
+          if [ "$BUMP" = none ]; then
+            echo "No releasable commits since $LAST. Skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          case "$BUMP" in
+            major) MAJ=$((MAJ+1)); MIN=0; PAT=0 ;;
+            minor) MIN=$((MIN+1)); PAT=0 ;;
+            patch) PAT=$((PAT+1)) ;;
+          esac
+          NEW="v${MAJ}.${MIN}.${PAT}"
+          echo "Bump $BUMP: $LAST → $NEW"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "tag=$NEW"  >> "$GITHUB_OUTPUT"
+          echo "last=$LAST" >> "$GITHUB_OUTPUT"
+          echo "bump=$BUMP" >> "$GITHUB_OUTPUT"
+
+      - name: Push new tag
+        if: steps.bump.outputs.skip == 'false'
+        run: |
+          NEW='${{ steps.bump.outputs.tag }}'
+          LAST='${{ steps.bump.outputs.last }}'
+          BUMP='${{ steps.bump.outputs.bump }}'
+          git tag -a "$NEW" -m "Release $NEW (auto, $BUMP bump from $LAST)"
+          git push origin "$NEW"
