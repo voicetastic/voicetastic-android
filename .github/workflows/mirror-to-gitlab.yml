@@ -1,0 +1,56 @@
+# Mirror `master` from GitHub to GitLab on every push to `master`.
+#
+# GitHub is canonical for `master`; GitLab
+# (git.cha-sam.re/voicetastic/android) keeps a copy so the existing
+# GitLab pipelines and bookmarks keep working. Required because
+# GitLab CE doesn't offer pull-mirroring (an EE feature), so we
+# push from GitHub instead.
+#
+# Scoped deliberately to `master` only (not `--mirror`): GitLab
+# still holds feature branches, release tags, and other refs that
+# pre-date this migration, and a `push --mirror` would wipe them.
+# If you want to bring more refs across later, push them to GitHub
+# first and then extend the `refspec` array below.
+#
+# Setup checklist (one-time):
+#   1. In GitLab → User Settings → Access Tokens, create a personal
+#      access token with the `write_repository` scope.
+#   2. In this repo, run:
+#        gh secret set GITLAB_TOKEN --body '<token>' -R voicetastic/voicetastic-android
+#   3. After setting the secret, trigger this workflow once manually
+#      via the Actions tab → "Mirror to GitLab" → Run workflow.
+name: Mirror to GitLab
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# One mirror run at a time; don't cancel a run in flight because the
+# next push arrived.
+concurrency:
+  group: mirror-to-gitlab
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the GitLab side accepts a fast-forward of
+          # the existing `master` ref without complaining about
+          # missing objects.
+          fetch-depth: 0
+
+      - name: Push master → GitLab
+        env:
+          GITLAB_TOKEN: ${{ secrets.GITLAB_TOKEN }}
+        run: |
+          if [ -z "$GITLAB_TOKEN" ]; then
+            echo "::error::GITLAB_TOKEN secret is not set. Create a GitLab personal access token with the write_repository scope and add it as a repo secret named GITLAB_TOKEN (see header comment in this workflow)."
+            exit 1
+          fi
+          git push --force \
+            "https://oauth2:${GITLAB_TOKEN}@git.cha-sam.re/voicetastic/android.git" \
+            HEAD:refs/heads/master
