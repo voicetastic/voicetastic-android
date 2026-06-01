@@ -229,6 +229,18 @@ class MessagingViewModel(
     private val _isRecording = MutableStateFlow(false)
     val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
 
+    /**
+     * Captured-clip-awaiting-confirmation file, when the user stopped a
+     * recording without sending it. Null in the Idle and Recording states.
+     * The UI's voice composer switches into Preview mode (Listen / Delete /
+     * Send) when this is non-null, mirroring desktop's `VoiceCompose::Preview`.
+     */
+    private val _previewFile = MutableStateFlow<File?>(null)
+    val previewFile: StateFlow<File?> = _previewFile.asStateFlow()
+
+    private val _isPreviewPlaying = MutableStateFlow(false)
+    val isPreviewPlaying: StateFlow<Boolean> = _isPreviewPlaying.asStateFlow()
+
     private val _isPlaying = MutableStateFlow(false)
     val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
 
@@ -461,7 +473,10 @@ class MessagingViewModel(
     }
 
     /**
-     * Stop recording and send the voice message.
+     * Stop recording and send the voice message immediately. Kept for
+     * callers that don't want the Preview state (e.g. tests); the chat
+     * UI now uses `stopRecordingToPreview()` so the user can listen and
+     * confirm before transmitting.
      */
     fun stopRecordingAndSend() {
         if (!_isRecording.value) return
@@ -473,6 +488,78 @@ class MessagingViewModel(
             viewModelScope.launch(Dispatchers.IO) {
                 sendVoiceFile(file)
             }
+        }
+    }
+
+    /**
+     * Stop recording but keep the captured file around so the user can
+     * preview it before sending. Drives the voice composer into Preview
+     * mode (Listen / Delete / Send), mirroring desktop's `VoiceCompose`
+     * state machine.
+     */
+    fun stopRecordingToPreview() {
+        if (!_isRecording.value) return
+        val file = recorder.stopRecording()
+        _isRecording.value = false
+        if (file != null && file.exists() && file.length() > 0) {
+            _previewFile.value = file
+        } else {
+            // Recording was empty or vanished; just go back to Idle.
+            currentRecordingFile = null
+        }
+    }
+
+    /**
+     * Play the recorded preview clip through the same decoder path
+     * inbound messages use. The codec choice comes from `voiceConfig`
+     * because the recorder always encodes with the currently-selected
+     * codec.
+     */
+    fun playPreview() {
+        val file = _previewFile.value ?: return
+        if (_isPreviewPlaying.value) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val bytes = runCatching { file.readBytes() }.getOrNull() ?: return@launch
+            val cfg = voiceConfig.value
+            val (codec, param) = when (cfg.codec) {
+                VoiceCodecChoice.AmrNb -> VoiceCodec.AmrNb to cfg.bitrate.ordinal
+                VoiceCodecChoice.Opus -> VoiceCodec.Opus to cfg.opusBitrateKbps
+                VoiceCodecChoice.Codec2 -> VoiceCodec.Codec2 to cfg.codec2Mode.ordinal
+            }
+            withContext(Dispatchers.Main) { _isPreviewPlaying.value = true }
+            try {
+                player.play(bytes, context.cacheDir, codec, param)
+            } catch (e: Exception) {
+                Log.e(TAG, "playPreview failed", e)
+            } finally {
+                withContext(Dispatchers.Main) { _isPreviewPlaying.value = false }
+            }
+        }
+    }
+
+    /** Interrupt the preview-clip playback (no-op if not playing). */
+    fun stopPreviewPlayback() {
+        if (!_isPreviewPlaying.value) return
+        player.stop()
+        _isPreviewPlaying.value = false
+    }
+
+    /** Drop the previewed clip without sending; returns to Idle. */
+    fun discardPreview() {
+        stopPreviewPlayback()
+        _previewFile.value?.delete()
+        _previewFile.value = null
+        currentRecordingFile = null
+    }
+
+    /** Send the previewed clip; returns to Idle once dispatched. */
+    fun sendPreview() {
+        val file = _previewFile.value ?: return
+        stopPreviewPlayback()
+        _previewFile.value = null
+        currentRecordingFile = null
+        if (file.exists() && file.length() > 0) {
+            viewModelScope.launch(Dispatchers.IO) { sendVoiceFile(file) }
         }
     }
 

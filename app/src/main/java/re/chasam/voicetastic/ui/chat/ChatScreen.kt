@@ -34,6 +34,8 @@ fun ChatScreen(viewModel: MessagingViewModel) {
     val availableChannels by viewModel.availableChannels.collectAsState()
     val connectionState by viewModel.connectionState.collectAsState()
     val isRecording by viewModel.isRecording.collectAsState()
+    val previewFile by viewModel.previewFile.collectAsState()
+    val isPreviewPlaying by viewModel.isPreviewPlaying.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
     val playingItemId by viewModel.playingItemId.collectAsState()
     val sendingProgress by viewModel.sendingProgress.collectAsState()
@@ -160,7 +162,7 @@ fun ChatScreen(viewModel: MessagingViewModel) {
             modifier = Modifier.fillMaxWidth()
         ) {
             if (isRecording) {
-                // Recording mode UI
+                // Recording mode UI: Stop drops the clip into Preview.
                 Row(
                     modifier = Modifier
                         .padding(12.dp)
@@ -178,8 +180,42 @@ fun ChatScreen(viewModel: MessagingViewModel) {
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.error
                     )
+                    FilledTonalButton(onClick = { viewModel.stopRecordingToPreview() }) {
+                        Icon(Icons.Default.Stop, contentDescription = stringResource(R.string.chat_stop))
+                        Spacer(Modifier.width(4.dp))
+                        Text(stringResource(R.string.chat_stop))
+                    }
+                }
+            } else if (previewFile != null) {
+                // Preview mode: Listen / Delete / Send the captured clip
+                // before transmitting. Mirrors desktop's VoiceCompose::Preview.
+                Row(
+                    modifier = Modifier
+                        .padding(12.dp)
+                        .fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    OutlinedButton(onClick = { viewModel.discardPreview() }) {
+                        Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.chat_preview_delete))
+                        Spacer(Modifier.width(4.dp))
+                        Text(stringResource(R.string.chat_preview_delete))
+                    }
+                    if (isPreviewPlaying) {
+                        OutlinedButton(onClick = { viewModel.stopPreviewPlayback() }) {
+                            Icon(Icons.Default.Stop, contentDescription = stringResource(R.string.chat_stop))
+                            Spacer(Modifier.width(4.dp))
+                            Text(stringResource(R.string.chat_stop))
+                        }
+                    } else {
+                        OutlinedButton(onClick = { viewModel.playPreview() }) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = stringResource(R.string.chat_preview_listen))
+                            Spacer(Modifier.width(4.dp))
+                            Text(stringResource(R.string.chat_preview_listen))
+                        }
+                    }
                     FilledTonalButton(
-                        onClick = { viewModel.stopRecordingAndSend() },
+                        onClick = { viewModel.sendPreview() },
                         colors = ButtonDefaults.filledTonalButtonColors(
                             containerColor = MaterialTheme.colorScheme.primaryContainer
                         )

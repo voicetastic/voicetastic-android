@@ -19,6 +19,8 @@
     <string name="chat_record_voice">Record voice message</string>
     <string name="chat_stop">Stop</string>
     <string name="chat_play">Play</string>
+    <string name="chat_preview_listen">Listen</string>
+    <string name="chat_preview_delete">Delete</string>
     <string name="chat_voice_label">Voice \u00b7 %dKB</string>
     <string name="chat_voice_incomplete">(%d/%d)</string>
     <string name="chat_incomplete">Incomplete</string>
