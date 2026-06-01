@@ -884,6 +884,17 @@ class ConfigViewModel(
         _configStatus.value = "Factory reset command sent"
     }
 
+    fun resetNodeDb() {
+        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.resetNodeDb()) {
+            _configStatus.value = "Reset NodeDB failed to send"
+            return
+        }
+        // `resetNodeDb()` now wraps reset-plus-refresh in the bridge, so
+        // we don't need a separate `refreshConfig()` call here.
+        _configStatus.value = "Reset NodeDB sent — refreshing…"
+    }
+
     fun clearStatus() { _configStatus.value = null }
 
     // ========================  UTILITIES  ========================

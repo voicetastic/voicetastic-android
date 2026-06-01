@@ -102,6 +102,7 @@ interface MeshFacade {
     fun removeFixedPosition(): Boolean
     fun rebootDevice(seconds: Int = 5): Boolean
     fun factoryReset(): Boolean
+    fun resetNodeDb(): Boolean
 
     // ----- Lifecycle -----
 

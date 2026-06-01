@@ -727,4 +727,20 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
             .build()
         return sendAdminMessage(admin)
     }
+
+    override fun resetNodeDb(): Boolean {
+        val admin = MeshProtos.AdminMessage.newBuilder()
+            .setNodedbReset(1)
+            .build()
+        if (!sendAdminMessage(admin)) return false
+        // The firmware never re-bursts NodeInfo for an empty NodeDB, so
+        // `refreshConfig()` alone wouldn't clear the visible peer list.
+        // Drop the local mirror in lockstep so the UI forgets the wiped
+        // peers immediately, then re-pull config sections.
+        nodeMap.clear()
+        _nodes.value = emptyList()
+        runCatching { rustService.refreshConfig() }
+            .onFailure { Log.e(TAG, "resetNodeDb: refreshConfig failed", it) }
+        return true
+    }
 }

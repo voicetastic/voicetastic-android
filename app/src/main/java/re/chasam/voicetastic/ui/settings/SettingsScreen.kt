@@ -29,7 +29,7 @@ import re.chasam.voicetastic.model.VoiceCodecChoice
  * dialog is open doesn't dismiss it (and doesn't accidentally re-fire
  * the action either).
  */
-private enum class PendingDeviceAction { Reboot, FactoryReset }
+private enum class PendingDeviceAction { Reboot, ResetNodeDb, FactoryReset }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -425,6 +425,13 @@ fun SettingsScreen(
                 }
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
+                    onClick = { pendingAction = PendingDeviceAction.ResetNodeDb },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.settings_reset_nodedb))
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
                     onClick = { pendingAction = PendingDeviceAction.FactoryReset },
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
@@ -523,6 +530,8 @@ fun SettingsScreen(
         val (titleRes, messageRes) = when (action) {
             PendingDeviceAction.Reboot ->
                 R.string.settings_reboot_confirm_title to R.string.settings_reboot_confirm_message
+            PendingDeviceAction.ResetNodeDb ->
+                R.string.settings_reset_nodedb_confirm_title to R.string.settings_reset_nodedb_confirm_message
             PendingDeviceAction.FactoryReset ->
                 R.string.settings_factory_reset_confirm_title to R.string.settings_factory_reset_confirm_message
         }
@@ -536,6 +545,7 @@ fun SettingsScreen(
                     onClick = {
                         when (action) {
                             PendingDeviceAction.Reboot -> viewModel.rebootDevice()
+                            PendingDeviceAction.ResetNodeDb -> viewModel.resetNodeDb()
                             PendingDeviceAction.FactoryReset -> viewModel.factoryReset()
                         }
                         pendingAction = null

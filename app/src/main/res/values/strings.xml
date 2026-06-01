@@ -86,6 +86,9 @@
     <string name="settings_reboot_confirm_message">The radio will disconnect for a few seconds while it restarts.</string>
     <string name="settings_factory_reset_confirm_title">Factory reset device?</string>
     <string name="settings_factory_reset_confirm_message">This wipes all configuration on the radio (channels, owner, position, network) and cannot be undone.</string>
+    <string name="settings_reset_nodedb">Reset NodeDB</string>
+    <string name="settings_reset_nodedb_confirm_title">Reset NodeDB?</string>
+    <string name="settings_reset_nodedb_confirm_message">Wipes every learned peer (positions, names, last-heard, public keys) on the connected radio and re-pulls the config burst so the UI reflects the wipe. Your own identity and config are kept.</string>
     <string name="settings_confirm">Confirm</string>
     <string name="settings_cancel">Cancel</string>
     <string name="settings_apply_lora">Apply LoRa Config</string>
