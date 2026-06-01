@@ -52,3 +52,33 @@ data class IncomingData(
         return result
     }
 }
+
+/**
+ * Coarse delivery outcome for an outgoing text/data packet. Mirrors the
+ * Rust bridge's `AckResultKind` (which in turn flattens core's
+ * `AckResult`). UI surfaces this on outgoing chat bubbles as the
+ * ⏳/✓/❌/⏱ icon.
+ */
+enum class DeliveryStatus {
+    /** No ack/nak yet; default for freshly-sent messages. */
+    Pending,
+
+    /** Firmware reported a successful delivery routing ack. */
+    Delivered,
+
+    /** Firmware reported a NAK or other routing failure. */
+    Failed,
+
+    /** No ack within the firmware's retry window. */
+    TimedOut,
+
+    /** Service shut down before the ack arrived (e.g. disconnect). */
+    Cancelled,
+}
+
+/**
+ * One per-packet ack/nak event surfaced from [MeshFacade.ackEvents].
+ * `packetId` matches the value returned by
+ * [MeshFacade.sendTextTracked] / [MeshFacade.sendData].
+ */
+data class MeshAckEvent(val packetId: UInt, val status: DeliveryStatus)

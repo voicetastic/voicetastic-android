@@ -51,6 +51,19 @@ class MessagingSteps {
                 true
             }
         }
+        // ViewModel now uses the tracked variant to capture the packet
+        // id for delivery-status icons. Mirror sendText's behaviour but
+        // return a stable fake packet id instead of a Boolean.
+        every { meshService.sendTextTracked(any(), any(), any()) } answers {
+            if (!isConnected) null
+            else {
+                val text = firstArg<String>()
+                val dest = secondArg<String?>()
+                val ch = thirdArg<Int>()
+                sentPackets.add(SentPacket(text, null, dest, Portnums.TEXT_MESSAGE_APP, ch))
+                1u
+            }
+        }
     }
 
     @Given("the Meshtastic service is connected")

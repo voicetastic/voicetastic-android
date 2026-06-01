@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.sp
 import re.chasam.voicetastic.R
 import kotlinx.coroutines.launch
 import re.chasam.voicetastic.model.ChatItem
+import re.chasam.voicetastic.service.DeliveryStatus
 import re.chasam.voicetastic.model.MeshNode
 import java.text.SimpleDateFormat
 import java.util.*
@@ -335,12 +336,30 @@ private fun TextMessageBubble(item: ChatItem.Text) {
                     text = item.text,
                     style = MaterialTheme.typography.bodyMedium
                 )
-                Text(
-                    text = timeFormat.format(Date(item.timestamp)),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontSize = 10.sp,
-                    modifier = Modifier.align(Alignment.End)
-                )
+                Row(
+                    modifier = Modifier.align(Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = timeFormat.format(Date(item.timestamp)),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 10.sp,
+                    )
+                    item.deliveryStatus?.let { status ->
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = when (status) {
+                                DeliveryStatus.Pending -> "⏳"
+                                DeliveryStatus.Delivered -> "✓"
+                                DeliveryStatus.Failed -> "❌"
+                                DeliveryStatus.TimedOut -> "⏱"
+                                DeliveryStatus.Cancelled -> "⊘"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 10.sp,
+                        )
+                    }
+                }
             }
         }
     }

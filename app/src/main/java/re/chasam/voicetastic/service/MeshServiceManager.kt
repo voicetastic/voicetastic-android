@@ -11,6 +11,8 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import re.chasam.voicetastic.core.Ports
 import re.chasam.voicetastic.model.MeshNode
+import uniffi.voicetastic.AckResultKind
+import uniffi.voicetastic.MeshAckListener
 import uniffi.voicetastic.MeshConfigListener
 import uniffi.voicetastic.MeshConnectionState
 import uniffi.voicetastic.MeshDataListener
@@ -53,6 +55,9 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
     private val _incomingDataMessages = MutableSharedFlow<IncomingData>(extraBufferCapacity = 64)
     override val incomingDataMessages: SharedFlow<IncomingData> = _incomingDataMessages.asSharedFlow()
+
+    private val _ackEvents = MutableSharedFlow<MeshAckEvent>(extraBufferCapacity = 64)
+    override val ackEvents: SharedFlow<MeshAckEvent> = _ackEvents.asSharedFlow()
 
     private val _myNodeId = MutableStateFlow<String?>(null)
     override val myNodeId: StateFlow<String?> = _myNodeId.asStateFlow()
@@ -328,6 +333,18 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
             }
         })
 
+        rustService.setAckListener(object : MeshAckListener {
+            override fun onAck(packetId: UInt, result: AckResultKind) {
+                val status = when (result) {
+                    AckResultKind.DELIVERED -> DeliveryStatus.Delivered
+                    AckResultKind.FAILED -> DeliveryStatus.Failed
+                    AckResultKind.TIMED_OUT -> DeliveryStatus.TimedOut
+                    AckResultKind.CANCELLED -> DeliveryStatus.Cancelled
+                }
+                _ackEvents.tryEmit(MeshAckEvent(packetId, status))
+            }
+        })
+
         rustService.setConfigListener(object : MeshConfigListener {
             override fun onMyInfo(encoded: ByteArray) {
                 runCatching { MeshProtos.MyNodeInfo.parseFrom(encoded) }
@@ -590,15 +607,19 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     // ==========  SENDING  ==========
 
     override fun sendText(text: String, destination: String?, channel: Int): Boolean {
+        return sendTextTracked(text, destination, channel) != null
+    }
+
+    override fun sendTextTracked(text: String, destination: String?, channel: Int): UInt? {
         if (!isConnected) {
             Log.w(TAG, "sendText dropped: not connected (state=${_connectionState.value}, transport=${_activeTransport.value})")
-            return false
+            return null
         }
 
         val destUInt: UInt? = if (destination != null) {
             MeshtasticBle.nodeIdToNum(destination)?.toUInt() ?: run {
                 Log.e(TAG, "Invalid destination node ID: $destination")
-                return false
+                return null
             }
         } else {
             null
@@ -610,10 +631,10 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                 TAG,
                 "sendText ok (id=$id, dest=${destination ?: "broadcast"}, destNum=${destUInt?.toString(16)?.let { "0x$it" } ?: "broadcast"}, ch=$channel, bytes=${text.length})"
             )
-            true
+            id
         } catch (e: Exception) {
             Log.e(TAG, "sendText failed", e)
-            false
+            null
         }
     }
 

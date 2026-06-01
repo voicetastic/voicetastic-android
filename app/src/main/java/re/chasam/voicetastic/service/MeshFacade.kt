@@ -78,6 +78,21 @@ interface MeshFacade {
     // ----- Outbound traffic -----
 
     fun sendText(text: String, destination: String? = null, channel: Int = 0): Boolean
+
+    /**
+     * Like [sendText] but returns the firmware's mesh packet id on success
+     * (or null on failure). Callers that want to correlate the outgoing
+     * message with the eventual delivery ack/nak should use this and pair
+     * the id with the per-packet event from [ackEvents].
+     */
+    fun sendTextTracked(text: String, destination: String? = null, channel: Int = 0): UInt?
+
+    /**
+     * Per-packet ack/nak events from the firmware. Emits once per outgoing
+     * packet for which the firmware reports a routing outcome. The packet
+     * id matches the one returned by [sendTextTracked].
+     */
+    val ackEvents: kotlinx.coroutines.flow.SharedFlow<MeshAckEvent>
     fun sendData(
         data: ByteArray,
         portNum: Int,

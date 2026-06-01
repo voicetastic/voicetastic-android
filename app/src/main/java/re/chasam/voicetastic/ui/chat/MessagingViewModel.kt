@@ -269,11 +269,34 @@ class MessagingViewModel(
         observeIncomingTextMessages()
         observeIncomingVoiceData()
         observeCompletedVoiceMessages()
+        observeAckEvents()
         startTickLoop()
 
         player.onCompletion = {
             _isPlaying.value = false
             _playingItemId.value = null
+        }
+    }
+
+    /**
+     * Subscribe to firmware-reported delivery acks/naks and stamp the
+     * matching outgoing [ChatItem.Text] with its [DeliveryStatus]. The
+     * lookup is by [ChatItem.Text.packetId], which `sendMessage` set at
+     * send time. No-op if no item matches (e.g. an ack for a packet sent
+     * before this view model existed, or for a non-text packet).
+     */
+    private fun observeAckEvents() {
+        viewModelScope.launch {
+            meshService.ackEvents.collect { ev ->
+                val updated = _allChatItems.value.map { item ->
+                    if (item is ChatItem.Text && item.packetId == ev.packetId) {
+                        item.copy(deliveryStatus = ev.status)
+                    } else {
+                        item
+                    }
+                }
+                _allChatItems.value = updated
+            }
         }
     }
 
@@ -439,11 +462,17 @@ class MessagingViewModel(
 
         val destination = _selectedNode.value?.nodeId
         val channel = _selectedChannel.value
-        val success = meshService.sendText(text, destination, channel)
+        // `sendTextTracked` returns the mesh packet id so the bubble can
+        // be correlated with the eventual ack/nak from `ackEvents`.
+        val packetId = meshService.sendTextTracked(text, destination, channel)
 
-        if (success) {
+        if (packetId != null) {
             val myId = meshService.myNodeId.value ?: "me"
             val toField = destination ?: "broadcast"
+            // Only unicast text packets get firmware-level acks; the
+            // bubble for a broadcast stays icon-less because no ack will
+            // ever arrive to clear a Pending state.
+            val initialStatus = if (destination != null) DeliveryStatus.Pending else null
             val item = ChatItem.Text(
                 id = ++itemIdCounter,
                 text = text,
@@ -452,7 +481,9 @@ class MessagingViewModel(
                 timestamp = System.currentTimeMillis(),
                 isOutgoing = true,
                 channel = channel,
-                contactKey = computeContactKey(myId, toField, isOutgoing = true)
+                contactKey = computeContactKey(myId, toField, isOutgoing = true),
+                packetId = packetId,
+                deliveryStatus = initialStatus,
             )
             appendChatItem(item)
         }

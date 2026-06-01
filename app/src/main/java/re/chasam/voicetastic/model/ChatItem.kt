@@ -1,5 +1,6 @@
 package re.chasam.voicetastic.model
 
+import re.chasam.voicetastic.service.DeliveryStatus
 import uniffi.voicetastic.VoiceCodec
 
 /**
@@ -30,7 +31,21 @@ sealed class ChatItem {
         override val isOutgoing: Boolean = false,
         val text: String,
         override val channel: Int = 0,
-        override val contactKey: String = "broadcast"
+        override val contactKey: String = "broadcast",
+        /**
+         * Mesh packet id assigned by the firmware when this message was
+         * sent. Only set for outgoing messages; null for inbound or for
+         * outgoing sends that failed at the wire-encode stage. Used to
+         * correlate the bubble with [deliveryStatus] updates from
+         * `MeshFacade.ackEvents`.
+         */
+        val packetId: UInt? = null,
+        /**
+         * Delivery-status icon to show on outgoing bubbles
+         * (⏳/✓/❌/⏱/⊘). Null for inbound messages and broadcasts that
+         * don't get acked by the firmware.
+         */
+        val deliveryStatus: DeliveryStatus? = null,
     ) : ChatItem()
 
     data class Voice(
