@@ -752,6 +752,30 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         return sendAdminMessage(admin)
     }
 
+    override fun broadcastPosition(
+        position: MeshProtos.Position,
+        channel: Int,
+        dest: String?,
+    ): Boolean {
+        if (!isConnected) {
+            Log.w(TAG, "broadcastPosition dropped: not connected")
+            return false
+        }
+        val destUInt: UInt? = dest?.let {
+            MeshtasticBle.nodeIdToNum(it)?.toUInt() ?: run {
+                Log.e(TAG, "broadcastPosition: invalid destination $it")
+                return false
+            }
+        }
+        return try {
+            rustService.broadcastPosition(position.toByteArray(), channel.toUInt(), destUInt)
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "broadcastPosition failed", e)
+            false
+        }
+    }
+
     override fun writeChannel(channel: MeshProtos.Channel): Boolean {
         val admin = MeshProtos.AdminMessage.newBuilder()
             .setSetChannel(channel)

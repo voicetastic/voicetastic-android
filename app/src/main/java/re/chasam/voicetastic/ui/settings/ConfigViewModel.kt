@@ -780,6 +780,24 @@ class ConfigViewModel(
         _configStatus.value = if (ok) "Fixed position cleared" else "Failed to clear fixed position"
     }
 
+    /**
+     * Broadcast the user-entered lat/lon/altitude as a one-shot Position
+     * packet on the mesh (POSITION_APP). Distinct from
+     * [applyFixedPosition] which writes a config admin message to the
+     * local radio without emitting a mesh packet.
+     */
+    fun broadcastPosition() {
+        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        val s = _positionState.value
+        val pos = MeshProtos.Position.newBuilder()
+            .setLatitudeI((s.fixedLatitude * 1e7).toInt())
+            .setLongitudeI((s.fixedLongitude * 1e7).toInt())
+            .setAltitude(s.fixedAltitude)
+            .build()
+        val ok = meshService.broadcastPosition(pos, channel = 0, dest = null)
+        _configStatus.value = if (ok) "Position broadcast sent" else "Failed to broadcast position"
+    }
+
     fun applyPowerConfig() {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
         if (meshService.powerConfig.value == null) {

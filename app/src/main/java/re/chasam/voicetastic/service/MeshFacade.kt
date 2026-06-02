@@ -122,6 +122,18 @@ interface MeshFacade {
     fun writeOwner(user: MeshProtos.User): Boolean
     fun setFixedPosition(position: MeshProtos.Position): Boolean
     fun removeFixedPosition(): Boolean
+
+    /**
+     * Broadcast a [Position] as a one-shot mesh packet (POSITION_APP).
+     * `dest == null` broadcasts; otherwise the packet is addressed to
+     * that node num. Distinct from [setFixedPosition], which writes a
+     * config admin message to the local radio (no mesh packet emitted).
+     */
+    fun broadcastPosition(
+        position: MeshProtos.Position,
+        channel: Int = 0,
+        dest: String? = null,
+    ): Boolean
     fun rebootDevice(seconds: Int = 5): Boolean
     fun factoryReset(): Boolean
     fun resetNodeDb(): Boolean

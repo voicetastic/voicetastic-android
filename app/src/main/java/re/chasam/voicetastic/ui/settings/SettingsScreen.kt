@@ -263,6 +263,13 @@ fun SettingsScreen(
                             Text("Clear")
                         }
                     }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { viewModel.broadcastPosition() },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Broadcast position now")
+                    }
                 }
                 Spacer(Modifier.height(8.dp))
                 SwitchSetting("Smart Broadcast", positionState.positionBroadcastSmartEnabled) { viewModel.setPositionSmartEnabled(it) }
