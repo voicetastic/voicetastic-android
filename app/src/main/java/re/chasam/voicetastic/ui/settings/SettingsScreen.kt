@@ -3,6 +3,8 @@ package re.chasam.voicetastic.ui.settings
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -22,6 +24,9 @@ import re.chasam.voicetastic.model.AmrNbBitrate
 import re.chasam.voicetastic.model.Codec2Mode
 import re.chasam.voicetastic.model.ThemePreference
 import re.chasam.voicetastic.model.VoiceCodecChoice
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Destructive device-side actions that must be confirmed before firing.
@@ -513,6 +518,13 @@ fun SettingsScreen(
             }
         }
 
+        // ===== Debug log =====
+        item {
+            ExpandableConfigCard(title = stringResource(R.string.settings_debug_log), icon = Icons.Default.BugReport) {
+                DebugLogContent(viewModel)
+            }
+        }
+
         // ===== Voice Config =====
         item {
             ExpandableSection(title = stringResource(R.string.settings_voice), icon = Icons.Default.Mic) {
@@ -847,3 +859,65 @@ private fun EnumDropdownSetting(
     }
 }
 
+
+@Composable
+private fun DebugLogContent(viewModel: ConfigViewModel) {
+    val entries by viewModel.debugLog.collectAsState()
+    var sourceFilter by remember { mutableStateOf("all") }
+    val sources = remember(entries) {
+        listOf("all") + entries.map { it.source }.distinct().sorted()
+    }
+    val filtered = entries.filter { sourceFilter == "all" || it.source == sourceFilter }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                "${filtered.size} of ${entries.size}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            OutlinedButton(onClick = { viewModel.clearDebugLog() }) { Text("Clear") }
+        }
+        Spacer(Modifier.height(4.dp))
+        EnumDropdownSetting("Source", sources, sourceFilter) { sourceFilter = it }
+        Spacer(Modifier.height(8.dp))
+        if (filtered.isEmpty()) {
+            Text(
+                "No events yet.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        } else {
+            val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+            // Cap rendered rows to keep recomposition cheap; oldest of
+            // the matched entries are dropped first.
+            val visible = filtered.takeLast(150)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 320.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                visible.forEach { e ->
+                    val color = when (e.level) {
+                        re.chasam.voicetastic.service.DebugLevel.Info -> MaterialTheme.colorScheme.onSurface
+                        re.chasam.voicetastic.service.DebugLevel.Warn -> MaterialTheme.colorScheme.tertiary
+                        re.chasam.voicetastic.service.DebugLevel.Error -> MaterialTheme.colorScheme.error
+                    }
+                    val icon = when (e.level) {
+                        re.chasam.voicetastic.service.DebugLevel.Info -> "·"
+                        re.chasam.voicetastic.service.DebugLevel.Warn -> "⚠"
+                        re.chasam.voicetastic.service.DebugLevel.Error -> "✗"
+                    }
+                    Text(
+                        text = "${timeFormat.format(Date(e.at))} $icon [${e.source}] ${e.message}",
+                        color = color,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    )
+                }
+            }
+        }
+    }
+}

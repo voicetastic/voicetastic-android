@@ -1004,6 +1004,14 @@ class ConfigViewModel(
 
     fun clearStatus() { _configStatus.value = null }
 
+    /** Live in-app event log, surfaced on the Debug settings card. */
+    val debugLog: StateFlow<List<re.chasam.voicetastic.service.DebugEntry>> =
+        meshService.debugLog
+
+    fun clearDebugLog() {
+        (meshService as? re.chasam.voicetastic.service.MeshServiceManager)?.clearDebugLog()
+    }
+
     // ========================  UTILITIES  ========================
 
     private fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }

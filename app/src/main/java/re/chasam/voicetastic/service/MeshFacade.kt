@@ -100,6 +100,13 @@ interface MeshFacade {
      * id matches the one returned by [sendTextTracked].
      */
     val ackEvents: kotlinx.coroutines.flow.SharedFlow<MeshAckEvent>
+
+    /**
+     * In-app structured event log surfaced on the Debug settings card.
+     * Bounded ring buffer (~500 entries) maintained by the service;
+     * UI subscribers can render and filter without polling.
+     */
+    val debugLog: StateFlow<List<DebugEntry>>
     fun sendData(
         data: ByteArray,
         portNum: Int,

@@ -82,3 +82,23 @@ enum class DeliveryStatus {
  * [MeshFacade.sendTextTracked] / [MeshFacade.sendData].
  */
 data class MeshAckEvent(val packetId: UInt, val status: DeliveryStatus)
+
+/**
+ * Severity tier used by the Debug log surface. Mirrors the desktop
+ * GUI's `DebugLevel` enum so a future structured-log channel through
+ * the bridge would map straight across.
+ */
+enum class DebugLevel { Info, Warn, Error }
+
+/**
+ * One in-app event surfaced in the Debug log panel. `source` groups
+ * entries by subsystem ("transport", "protocol", "voice", "mesh",
+ * "settings") so the panel can filter; `message` is a short
+ * human-readable summary.
+ */
+data class DebugEntry(
+    val at: Long = System.currentTimeMillis(),
+    val level: DebugLevel = DebugLevel.Info,
+    val source: String = "",
+    val message: String = "",
+)

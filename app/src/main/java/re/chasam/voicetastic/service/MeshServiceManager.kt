@@ -24,6 +24,12 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
     companion object {
         private const val TAG = "MeshServiceManager"
+        /**
+         * Cap on retained Debug log entries before FIFO eviction. ~500
+         * lines covers a few minutes of dense radio activity without
+         * leaking memory.
+         */
+        private const val DEBUG_LOG_CAP = 500
     }
     // IncomingText / IncomingData / TransportType moved to MeshTypes.kt
     // so the [MeshFacade] interface can reference them without
@@ -58,6 +64,28 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
     private val _ackEvents = MutableSharedFlow<MeshAckEvent>(extraBufferCapacity = 64)
     override val ackEvents: SharedFlow<MeshAckEvent> = _ackEvents.asSharedFlow()
+
+    private val _debugLog = MutableStateFlow<List<DebugEntry>>(emptyList())
+    override val debugLog: StateFlow<List<DebugEntry>> = _debugLog.asStateFlow()
+
+    /**
+     * Append a [DebugEntry] to the in-app log, evicting FIFO past
+     * [DEBUG_LOG_CAP]. Called from inside the listener callbacks for
+     * every event worth surfacing on the Debug screen.
+     */
+    private fun pushDebug(source: String, message: String, level: DebugLevel = DebugLevel.Info) {
+        val current = _debugLog.value
+        val capped = if (current.size >= DEBUG_LOG_CAP) {
+            current.drop(current.size - DEBUG_LOG_CAP + 1)
+        } else {
+            current
+        }
+        _debugLog.value = capped + DebugEntry(level = level, source = source, message = message)
+    }
+
+    fun clearDebugLog() {
+        _debugLog.value = emptyList()
+    }
 
     private val _myNodeId = MutableStateFlow<String?>(null)
     override val myNodeId: StateFlow<String?> = _myNodeId.asStateFlow()
@@ -262,6 +290,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     MeshConnectionState.DISCONNECTED -> "DISCONNECTED"
                 }
                 Log.d(TAG, "Rust state -> $state (mapped=$mapped)")
+                pushDebug("transport", "state → $state")
 
                 // Suppress CONNECTING (which Rust emits as CONFIGURING during a
                 // user-initiated refresh) while we're already connected and inside
@@ -295,6 +324,10 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                 Log.d(
                     TAG,
                     "rx text from=${message.fromId} to=$toId (raw=0x${toInt.toUInt().toString(16)}) ch=${message.channel} bytes=${message.text.length}"
+                )
+                pushDebug(
+                    "mesh",
+                    "rx text from=${message.fromId} to=$toId ch=${message.channel} (${message.text.length}B)",
                 )
                 _incomingTextMessages.tryEmit(
                     IncomingText(
@@ -346,6 +379,18 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     AckResultKind.TIMED_OUT -> DeliveryStatus.TimedOut
                     AckResultKind.CANCELLED -> DeliveryStatus.Cancelled
                 }
+                val level = when (status) {
+                    DeliveryStatus.Delivered -> DebugLevel.Info
+                    DeliveryStatus.Failed,
+                    DeliveryStatus.TimedOut,
+                    DeliveryStatus.Cancelled -> DebugLevel.Warn
+                    DeliveryStatus.Pending -> DebugLevel.Info
+                }
+                pushDebug(
+                    "mesh",
+                    "ack id=0x${packetId.toString(16)} → $status",
+                    level,
+                )
                 _ackEvents.tryEmit(MeshAckEvent(packetId, status))
             }
         })
