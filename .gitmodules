@@ -1,4 +1,4 @@
-[submodule "third_party/voicetastic-desktop"]
-	path = third_party/voicetastic-desktop
+[submodule "third_party/voicetastic-core"]
+	path = third_party/voicetastic-core
 	url = https://github.com/voicetastic/voicetastic-core.git
 	branch = main

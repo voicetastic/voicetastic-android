@@ -65,9 +65,15 @@ fun AppNavigation(
     val currentRoute = navBackStackEntry?.destination?.route
     val connectionState by meshServiceManager.connectionState.collectAsState()
     val selfNode by meshServiceManager.selfNode.collectAsState()
+    val myNodeId by meshServiceManager.myNodeId.collectAsState()
 
+    // The brand palette is entirely warm (peach seed), so primaryContainer
+    // (connected) and errorContainer (disconnected) render as near-identical
+    // tones — indistinguishable as a solid logo silhouette. Use an explicit,
+    // clearly lighter green for connected (matching the map's "you" pin
+    // convention) so the connected state reads at a glance.
     val logoColor = when (connectionState) {
-        "CONNECTED" -> MaterialTheme.colorScheme.primaryContainer
+        "CONNECTED" -> Color(0xFF66BB6A) // light green
         "CONNECTING" -> MaterialTheme.colorScheme.tertiaryContainer
         else -> MaterialTheme.colorScheme.errorContainer
     }
@@ -111,16 +117,25 @@ fun AppNavigation(
                         }
 
                         Spacer(modifier = Modifier.width(16.dp))
-                        if (connectionState == "CONNECTED" && node != null) {
+                        // Swap the app name for node info as soon as we know our
+                        // node id (from MyNodeInfo). The full `selfNode` (and so
+                        // the long name) arrives a beat later via the self
+                        // NodeInfo / Owner, so fall back to the id-only view in
+                        // the meantime rather than waiting for everything.
+                        val nodeIdText = node?.nodeId ?: myNodeId
+                        if (connectionState == "CONNECTED" && nodeIdText != null) {
+                            val longName = node?.longName?.takeIf { it.isNotBlank() }
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    node.longName,
+                                    longName ?: nodeIdText,
                                     style = MaterialTheme.typography.bodyLarge
                                 )
-                                Text(
-                                    node.nodeId,
-                                    style = MaterialTheme.typography.labelSmall
-                                )
+                                if (longName != null) {
+                                    Text(
+                                        nodeIdText,
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                }
                             }
                         } else {
                             Text(

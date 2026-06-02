@@ -47,7 +47,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0          # release-notes need `git log <prev-tag>..HEAD`
-          submodules: recursive   # voicetastic-desktop is a submodule
+          submodules: recursive   # voicetastic-core is a submodule
 
       - name: Install protobuf-compiler + libprotobuf-dev
         run: |
@@ -85,7 +85,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             third_party/voicetastic-desktop/target-android
-          key: gradle-cargo-${{ hashFiles('gradle/libs.versions.toml', 'third_party/voicetastic-desktop/Cargo.lock') }}
+          key: gradle-cargo-${{ hashFiles('gradle/libs.versions.toml', 'third_party/voicetastic-core/Cargo.lock') }}
           restore-keys: |
             gradle-cargo-
 

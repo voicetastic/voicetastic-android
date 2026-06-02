@@ -177,7 +177,7 @@ Voicetastic is distributed under the
 [GNU General Public License v3.0 or later](./LICENSE)
 (`SPDX-License-Identifier: GPL-3.0-or-later`). The bundled
 `voicetastic-desktop` core (under `third_party/`) carries the same
-licence; see its own [`LICENSE`](./third_party/voicetastic-desktop/LICENSE)
+licence; see its own [`LICENSE`](third_party/voicetastic-core/LICENSE)
 for the full text.
 
 
