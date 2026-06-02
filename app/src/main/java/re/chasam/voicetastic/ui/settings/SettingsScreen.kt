@@ -525,6 +525,32 @@ fun SettingsScreen(
             }
         }
 
+        // ===== Firmware update (placeholder) =====
+        item {
+            ExpandableConfigCard(title = stringResource(R.string.settings_firmware_update), icon = Icons.Default.SystemUpdate) {
+                Text(
+                    text = "Installed: ${firmwareVersion ?: "—"}",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "OTA upload from this app is not yet implemented. " +
+                        "The transport (XModem-over-AdminMessage) is in the " +
+                        "Meshtastic protocol but the upload loop, CRC, retry, " +
+                        "and progress reporting are deliberately not wired " +
+                        "here to avoid bricking radios mid-transfer.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "For now, flash via the Meshtastic web flasher " +
+                        "(flasher.meshtastic.org) or `meshtastic --update`.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+
         // ===== Voice Config =====
         item {
             ExpandableSection(title = stringResource(R.string.settings_voice), icon = Icons.Default.Mic) {

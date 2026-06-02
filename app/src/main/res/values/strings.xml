@@ -86,6 +86,7 @@
     <string name="settings_voice">Voice</string>
     <string name="settings_device_actions">Device Actions</string>
     <string name="settings_debug_log">Debug log</string>
+    <string name="settings_firmware_update">Firmware update</string>
     <string name="settings_reboot">Reboot Device</string>
     <string name="settings_factory_reset">Factory Reset</string>
     <string name="settings_reboot_confirm_title">Reboot device?</string>
