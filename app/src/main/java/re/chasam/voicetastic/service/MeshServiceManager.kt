@@ -112,6 +112,9 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     private val _myNodeId = MutableStateFlow<String?>(null)
     override val myNodeId: StateFlow<String?> = _myNodeId.asStateFlow()
 
+    private val _selfNode = MutableStateFlow<MeshNode?>(null)
+    override val selfNode: StateFlow<MeshNode?> = _selfNode.asStateFlow()
+
     private val _firmwareVersion = MutableStateFlow<String?>(null)
     override val firmwareVersion: StateFlow<String?> = _firmwareVersion.asStateFlow()
 
@@ -208,6 +211,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         myNodeNum = null
         configBurstInProgress = false
         _myNodeId.value = null
+        _selfNode.value = null
         _firmwareVersion.value = null
         nodeMap.clear()
         _nodes.value = emptyList()
@@ -229,12 +233,15 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         usbTransport.onDeviceDetached(device)
     }
 
+
     private fun mergeNodeFromUser(nodeNum: Int, payload: ByteArray, rxTime: Long) {
         if (nodeNum == 0 || nodeNum == MeshtasticBle.BROADCAST_ADDR) return
         val user = runCatching { MeshProtos.User.parseFrom(payload) }.getOrNull() ?: return
         val existing = nodeMap[nodeNum]
-        val base = existing ?: MeshNode(nodeId = MeshtasticBle.nodeNumToId(nodeNum))
+        val nodeId = MeshtasticBle.nodeNumToId(nodeNum)
+        val base = existing ?: MeshNode(nodeId = nodeId)
         val node = base.copy(
+            nodeId = nodeId,
             longName = user.longName.ifEmpty { base.longName },
             shortName = user.shortName.ifEmpty { base.shortName },
             lastHeard = if (rxTime != 0L) rxTime else base.lastHeard,
@@ -243,6 +250,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
             isLicensed = user.isLicensed,
         )
         nodeMap[nodeNum] = node
+        if (myNodeNum != null && nodeNum == myNodeNum) _selfNode.value = node
         _nodes.value = nodeMap.values.toList()
     }
 
@@ -250,9 +258,44 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         if (nodeNum == 0 || nodeNum == MeshtasticBle.BROADCAST_ADDR) return
         if (rxTime == 0L && nodeMap.containsKey(nodeNum)) return
         val existing = nodeMap[nodeNum]
-        val node = (existing ?: MeshNode(nodeId = MeshtasticBle.nodeNumToId(nodeNum)))
-            .copy(lastHeard = if (rxTime != 0L) rxTime else existing?.lastHeard ?: 0L)
+        val nodeId = MeshtasticBle.nodeNumToId(nodeNum)
+        val node = (existing ?: MeshNode(nodeId = nodeId))
+            .copy(
+                nodeId = nodeId,
+                lastHeard = if (rxTime != 0L) rxTime else existing?.lastHeard ?: 0L
+            )
         nodeMap[nodeNum] = node
+        if (myNodeNum != null && nodeNum == myNodeNum) _selfNode.value = node
+        _nodes.value = nodeMap.values.toList()
+    }
+
+    /**
+     * Merge a live POSITION_APP broadcast into the node's coordinates. These
+     * packets are the only position source for nodes that broadcast on the
+     * fly (rather than via a NodeInfo carrying an embedded position), and for
+     * our own node they feed [myPosition] (used to pre-fill the fixed-position
+     * settings and the map's "you" pin). A (0, 0) payload means "no fix", so
+     * the existing coordinates are kept; lastHeard is always bumped.
+     */
+    private fun mergeNodeFromPosition(nodeNum: Int, payload: ByteArray, rxTime: Long) {
+        if (nodeNum == 0 || nodeNum == MeshtasticBle.BROADCAST_ADDR) return
+        val pos = runCatching { MeshProtos.Position.parseFrom(payload) }.getOrNull()
+            ?: return touchNodeLastHeard(nodeNum, rxTime)
+        val hasFix = pos.latitudeI != 0 || pos.longitudeI != 0
+        val existing = nodeMap[nodeNum]
+        val nodeId = MeshtasticBle.nodeNumToId(nodeNum)
+        val node = (existing ?: MeshNode(nodeId = nodeId)).copy(
+            nodeId = nodeId,
+            latitudeI = if (hasFix) pos.latitudeI else existing?.latitudeI,
+            longitudeI = if (hasFix) pos.longitudeI else existing?.longitudeI,
+            altitude = if (hasFix) pos.altitude else existing?.altitude,
+            lastHeard = if (rxTime != 0L) rxTime else existing?.lastHeard ?: 0L,
+        )
+        nodeMap[nodeNum] = node
+        if (myNodeNum != null && nodeNum == myNodeNum) {
+            _selfNode.value = node
+            if (hasFix) _myPosition.value = pos
+        }
         _nodes.value = nodeMap.values.toList()
     }
 
@@ -377,7 +420,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
                 when (message.portnum) {
                     Ports.NODEINFO_APP -> mergeNodeFromUser(fromNum, message.payload, message.rxTime.toLong())
-                    Ports.POSITION_APP -> touchNodeLastHeard(fromNum, message.rxTime.toLong())
+                    Ports.POSITION_APP -> mergeNodeFromPosition(fromNum, message.payload, message.rxTime.toLong())
                 }
 
                 _incomingDataMessages.tryEmit(
@@ -423,6 +466,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     .onSuccess { info ->
                         myNodeNum = info.myNodeNum
                         _myNodeId.value = MeshtasticBle.nodeNumToId(info.myNodeNum)
+                        nodeMap[info.myNodeNum]?.let { _selfNode.value = it }
                     }
             }
 
@@ -482,6 +526,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                             snr = ni.snr,
                         )
                         val my = myNodeNum
+                        if (my != null && ni.num == my) _selfNode.value = node
                         if (my != null && ni.num == my && ni.hasUser()) _owner.value = ni.user
                         if (my != null && ni.num == my && ni.hasPosition()) _myPosition.value = ni.position
                     }
@@ -515,7 +560,23 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
             override fun onOwner(encoded: ByteArray) {
                 runCatching { MeshProtos.User.parseFrom(encoded) }
-                    .onSuccess { _owner.value = it }
+                    .onSuccess { user ->
+                        _owner.value = user
+                        val myId = _myNodeId.value
+                        if (myId != null) {
+                            val myNum = myNodeNum
+                            val existing = if (myNum != null) nodeMap[myNum] else _selfNode.value
+                            val node = (existing ?: MeshNode(nodeId = myId)).copy(
+                                nodeId = myId,
+                                longName = user.longName.ifEmpty { existing?.longName ?: "Unknown" },
+                                shortName = user.shortName.ifEmpty { existing?.shortName ?: "??" },
+                                hwModel = user.hwModelValue,
+                                role = user.roleValue,
+                                isLicensed = user.isLicensed,
+                            )
+                            _selfNode.value = node
+                        }
+                    }
             }
 
             override fun onMetadata(encoded: ByteArray) {

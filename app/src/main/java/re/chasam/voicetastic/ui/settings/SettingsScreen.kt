@@ -53,7 +53,6 @@ fun SettingsScreen(
     var pendingAction by rememberSaveable { mutableStateOf<PendingDeviceAction?>(null) }
     val connectionState by viewModel.connectionState.collectAsState()
     val configStatus by viewModel.configStatus.collectAsState()
-    val myNodeId by viewModel.myNodeId.collectAsState()
     val firmwareVersion by viewModel.firmwareVersion.collectAsState()
 
     val ownerState by viewModel.ownerState.collectAsState()
@@ -108,34 +107,6 @@ fun SettingsScreen(
         contentPadding = PaddingValues(vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        // ===== Connection Status =====
-        item {
-            Card(
-                colors = CardDefaults.cardColors(
-                    containerColor = when (connectionState) {
-                        "CONNECTED" -> MaterialTheme.colorScheme.primaryContainer
-                        "CONNECTING" -> MaterialTheme.colorScheme.tertiaryContainer
-                        else -> MaterialTheme.colorScheme.errorContainer
-                    }
-                )
-            ) {
-                Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(stringResource(R.string.settings_status_format, connectionState), style = MaterialTheme.typography.titleMedium)
-                            if (connectionState == "CONNECTED") {
-                                myNodeId?.let { Text(stringResource(R.string.settings_node_id, it), style = MaterialTheme.typography.bodySmall) }
-                                firmwareVersion?.let { Text(stringResource(R.string.settings_firmware, it), style = MaterialTheme.typography.bodySmall) }
-                            }
-                        }
-                        IconButton(onClick = { viewModel.refreshDeviceConfig() }) {
-                            Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.settings_refresh_config))
-                        }
-                    }
-                }
-            }
-        }
-
         // ===== Appearance =====
         item {
             Card {

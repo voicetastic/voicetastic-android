@@ -404,14 +404,19 @@ class ConfigViewModel(
     }
 
     /**
-     * Pre-fill the fixed-position lat/lon/alt fields from our own NodeInfo
-     * so the user has a sensible starting point rather than zeros.
-     * Skipped when the user is mid-edit (position dirty).
+     * Pre-fill the fixed-position lat/lon/alt fields from the device's own
+     * reported position so the user has a sensible starting point rather than
+     * zeros.
+     *
+     * Seeds only while the fields are still empty (all zero), which is enough
+     * to avoid clobbering anything the user has typed. Intentionally NOT gated
+     * on the section's dirty flag: enabling the "Fixed Position" toggle marks
+     * the section dirty, yet the lat/lon should still pre-fill from the device.
      */
     private fun updateFixedPositionFromMyPosition(p: MeshProtos.Position) {
-        if (isDirty("position")) return
+        // A (0, 0) payload means "no fix" - nothing useful to seed.
+        if (p.latitudeI == 0 && p.longitudeI == 0) return
         val cur = _positionState.value
-        // Only seed when user hasn't entered something non-zero already.
         if (cur.fixedLatitude == 0.0 && cur.fixedLongitude == 0.0 && cur.fixedAltitude == 0) {
             _positionState.value = cur.copy(
                 fixedLatitude = p.latitudeI / 1e7,

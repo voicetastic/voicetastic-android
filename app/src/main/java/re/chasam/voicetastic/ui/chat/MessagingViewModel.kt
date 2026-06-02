@@ -184,6 +184,8 @@ class MessagingViewModel(
     val nodes: StateFlow<List<MeshNode>> = meshService.nodes
     /** Local node id (`!aabbccdd`), or null until the device handshake completes. */
     val myNodeId: StateFlow<String?> = meshService.myNodeId
+    /** Our own node (matched by node number), or null while disconnected. */
+    val selfNode: StateFlow<MeshNode?> = meshService.selfNode
     /** Per-node telemetry history exposed for the node-detail dialog's sparklines. */
     val nodeHistory: StateFlow<Map<Int, List<re.chasam.voicetastic.service.NodeSample>>> =
         meshService.nodeHistory
