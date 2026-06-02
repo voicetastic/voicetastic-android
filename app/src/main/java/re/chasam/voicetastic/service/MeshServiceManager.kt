@@ -182,13 +182,14 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         if (nodeNum == 0 || nodeNum == MeshtasticBle.BROADCAST_ADDR) return
         val user = runCatching { MeshProtos.User.parseFrom(payload) }.getOrNull() ?: return
         val existing = nodeMap[nodeNum]
-        val node = MeshNode(
-            nodeId = MeshtasticBle.nodeNumToId(nodeNum),
-            longName = user.longName.ifEmpty { existing?.longName ?: "Unknown" },
-            shortName = user.shortName.ifEmpty { existing?.shortName ?: "??" },
-            lastHeard = if (rxTime != 0L) rxTime else existing?.lastHeard ?: 0L,
-            batteryLevel = existing?.batteryLevel,
-            snr = existing?.snr,
+        val base = existing ?: MeshNode(nodeId = MeshtasticBle.nodeNumToId(nodeNum))
+        val node = base.copy(
+            longName = user.longName.ifEmpty { base.longName },
+            shortName = user.shortName.ifEmpty { base.shortName },
+            lastHeard = if (rxTime != 0L) rxTime else base.lastHeard,
+            hwModel = user.hwModelValue,
+            role = user.roleValue,
+            isLicensed = user.isLicensed,
         )
         nodeMap[nodeNum] = node
         _nodes.value = nodeMap.values.toList()
@@ -374,13 +375,28 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                                 "hasUser=${ni.hasUser()} lastHeard=${ni.lastHeard} " +
                                 "burst=$configBurstInProgress mapSizeBefore=${nodeMap.size}"
                         )
+                        val metrics = if (ni.hasDeviceMetrics()) ni.deviceMetrics else null
+                        val pos = if (ni.hasPosition()) ni.position else null
                         val node = MeshNode(
                             nodeId = nodeIdStr,
                             longName = longName,
                             shortName = shortName,
                             lastHeard = ni.lastHeard.toLong(),
-                            batteryLevel = if (ni.hasDeviceMetrics()) ni.deviceMetrics.batteryLevel.toInt() else null,
+                            batteryLevel = metrics?.batteryLevel?.toInt(),
                             snr = if (ni.snr != 0f) ni.snr else null,
+                            voltage = metrics?.voltage,
+                            channelUtilization = metrics?.channelUtilization,
+                            airUtilTx = metrics?.airUtilTx,
+                            uptimeSeconds = metrics?.uptimeSeconds,
+                            latitudeI = pos?.latitudeI,
+                            longitudeI = pos?.longitudeI,
+                            altitude = pos?.altitude,
+                            channel = ni.channel,
+                            hwModel = if (ni.hasUser()) ni.user.hwModelValue else 0,
+                            role = if (ni.hasUser()) ni.user.roleValue else 0,
+                            isLicensed = if (ni.hasUser()) ni.user.isLicensed else false,
+                            viaMqtt = ni.viaMqtt,
+                            isFavorite = ni.isFavorite,
                         )
                         nodeMap[ni.num] = node
                         if (!configBurstInProgress) {

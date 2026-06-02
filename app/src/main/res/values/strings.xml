@@ -25,6 +25,8 @@
     <string name="chat_voice_incomplete">(%d/%d)</string>
     <string name="chat_incomplete">Incomplete</string>
     <string name="chat_send_to_title">Send to</string>
+    <string name="chat_node_detail_title">Node details</string>
+    <string name="chat_close">Close</string>
     <string name="chat_broadcast_all">Broadcast (all nodes)</string>
     <string name="chat_select_channel_title">Select Channel</string>
     <string name="chat_channel_entry">Channel %d</string>

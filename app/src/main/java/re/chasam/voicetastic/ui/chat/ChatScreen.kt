@@ -2,6 +2,8 @@ package re.chasam.voicetastic.ui.chat
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -437,6 +439,7 @@ private fun NodePickerDialog(
     onNodeSelected: (MeshNode?) -> Unit,
     onDismiss: () -> Unit
 ) {
+    var detailNode by remember { mutableStateOf<MeshNode?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.chat_send_to_title)) },
@@ -459,6 +462,16 @@ private fun NodePickerDialog(
                         headlineContent = { Text(node.longName) },
                         supportingContent = { Text(node.nodeId) },
                         leadingContent = { Text(node.shortName, fontWeight = FontWeight.Bold) },
+                        // Info button opens the detail dialog; the row's
+                        // body still selects the node for messaging.
+                        trailingContent = {
+                            IconButton(onClick = { detailNode = node }) {
+                                Icon(
+                                    Icons.Default.Info,
+                                    contentDescription = stringResource(R.string.chat_node_detail_title),
+                                )
+                            }
+                        },
                         modifier = Modifier.clickable { onNodeSelected(node) },
                         colors = ListItemDefaults.colors(
                             containerColor = if (selectedNode?.nodeId == node.nodeId)
@@ -474,6 +487,93 @@ private fun NodePickerDialog(
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.chat_cancel)) }
         }
     )
+    detailNode?.let { node ->
+        NodeDetailDialog(node = node, onDismiss = { detailNode = null })
+    }
+}
+
+@Composable
+private fun NodeDetailDialog(node: MeshNode, onDismiss: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(node.longName.ifBlank { node.nodeId }) },
+        text = {
+            // A scrollable column of label / value pairs so the dialog
+            // never overflows on devices with smaller heights.
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
+                NodeDetailRow("ID", node.nodeId)
+                NodeDetailRow("Short name", node.shortName)
+                NodeDetailRow("HW model", node.hwModel.toString())
+                NodeDetailRow("Role", node.role.toString())
+                if (node.isLicensed) NodeDetailRow("HAM", "yes")
+                NodeDetailRow("Channel", node.channel.toString())
+                if (node.lastHeard != 0L) NodeDetailRow(
+                    "Last heard",
+                    "${formatRelativeAge(node.lastHeard)} (${node.lastHeard})",
+                )
+                node.snr?.let { NodeDetailRow("SNR", "%.1f dB".format(it)) }
+                if (node.latitudeI != null && node.longitudeI != null) {
+                    NodeDetailRow(
+                        "Position",
+                        "%.5f, %.5f".format(node.latitudeI / 1e7, node.longitudeI / 1e7),
+                    )
+                }
+                node.altitude?.let { NodeDetailRow("Altitude", "$it m") }
+                node.batteryLevel?.let {
+                    NodeDetailRow("Battery", if (it == 101) "AC" else "$it%")
+                }
+                node.voltage?.let { NodeDetailRow("Voltage", "%.2f V".format(it)) }
+                node.channelUtilization?.let { NodeDetailRow("Ch util", "%.1f%%".format(it)) }
+                node.airUtilTx?.let { NodeDetailRow("Air util TX", "%.1f%%".format(it)) }
+                node.uptimeSeconds?.let { NodeDetailRow("Uptime", formatUptime(it)) }
+                if (node.viaMqtt) NodeDetailRow("Via MQTT", "yes")
+                if (node.isFavorite) NodeDetailRow("Favorite", "yes")
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.chat_close)) }
+        },
+    )
+}
+
+@Composable
+private fun NodeDetailRow(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Text(
+            text = label,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.width(112.dp),
+        )
+        Text(text = value, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+private fun formatRelativeAge(lastHeard: Long): String {
+    if (lastHeard == 0L) return "—"
+    val now = System.currentTimeMillis() / 1000L
+    val age = (now - lastHeard).coerceAtLeast(0)
+    return when {
+        age < 60 -> "${age}s ago"
+        age < 3600 -> "${age / 60}m ago"
+        age < 86_400 -> "${age / 3600}h ago"
+        else -> "${age / 86_400}d ago"
+    }
+}
+
+private fun formatUptime(secs: Int): String {
+    val s = secs % 60
+    val m = (secs / 60) % 60
+    val h = (secs / 3600) % 24
+    val d = secs / 86_400
+    return when {
+        d > 0 -> "${d}d ${h}h"
+        h > 0 -> "${h}h ${m}m"
+        m > 0 -> "${m}m ${s}s"
+        else -> "${s}s"
+    }
 }
 
 @Composable
