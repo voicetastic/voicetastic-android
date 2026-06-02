@@ -6,6 +6,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MyLocation
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -40,32 +44,35 @@ import re.chasam.voicetastic.ui.chat.MessagingViewModel
 @Composable
 fun MapScreen(messagingViewModel: MessagingViewModel) {
     val nodes by messagingViewModel.nodes.collectAsState()
+    val myNodeId by messagingViewModel.myNodeId.collectAsState()
     val context = LocalContext.current
 
     // osmdroid needs a one-time user-agent + tile cache config. The
     // SharedPreferences-backed `Configuration` is the official entry
     // point; we set it once per process.
     remember {
-        Configuration.getInstance().load(
-            context.applicationContext,
-            PreferenceManager.getDefaultSharedPreferences(context.applicationContext),
-        )
-        Configuration.getInstance().userAgentValue = "re.chasam.voicetastic"
+        try {
+            Configuration.getInstance().load(
+                context.applicationContext,
+                PreferenceManager.getDefaultSharedPreferences(context.applicationContext),
+            )
+            // Explicitly set cache dir to app cache (guaranteed writable)
+            Configuration.getInstance().osmdroidBasePath = context.cacheDir
+            Configuration.getInstance().osmdroidTileCache = context.cacheDir
+            Configuration.getInstance().userAgentValue = "re.chasam.voicetastic"
+        } catch (e: Exception) {
+            android.util.Log.e("MapScreen", "osmdroid config failed", e)
+        }
         Unit
     }
 
     val mapView = remember {
         MapView(context).apply {
-            setTileSource(TileSourceFactory.MAPNIK)
+            //setTileSource(TileSourceFactory.MAPNIK)
             setMultiTouchControls(true)
             controller.setZoom(2.0)
             controller.setCenter(GeoPoint(20.0, 0.0))
         }
-    }
-
-    DisposableEffect(Unit) {
-        mapView.onResume()
-        onDispose { mapView.onPause(); mapView.onDetach() }
     }
 
     // Refresh markers from the latest nodes snapshot whenever it
@@ -80,7 +87,10 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
         )
         Box(modifier = Modifier.fillMaxSize()) {
             AndroidView(
-                factory = { mapView },
+                factory = {
+                    mapView.onResume()
+                    mapView
+                },
                 modifier = Modifier.fillMaxSize(),
                 update = { mv ->
                     // Wipe + re-add markers. The peer list is small
@@ -119,6 +129,24 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                     mv.invalidate()
                 },
             )
+            FloatingActionButton(
+                onClick = {
+                    val myNode = nodes.firstOrNull { it.nodeId == myNodeId }
+                    val lat = myNode?.latitudeI
+                    val lon = myNode?.longitudeI
+                    if (lat != null && lon != null && (lat != 0 || lon != 0)) {
+                        mapView.controller.setCenter(GeoPoint(lat / 1e7, lon / 1e7))
+                        mapView.controller.setZoom(16.0)
+                    }
+                },
+                modifier = Modifier.padding(16.dp).align(androidx.compose.ui.Alignment.BottomEnd),
+            ) {
+                Icon(Icons.Default.MyLocation, contentDescription = "Center on my location")
+            }
         }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { mapView.onPause(); mapView.onDetach() }
     }
 }

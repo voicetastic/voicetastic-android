@@ -1,5 +1,10 @@
 package re.chasam.voicetastic.ui.settings
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -14,7 +19,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -61,6 +68,39 @@ fun SettingsScreen(
     val channelsState by viewModel.channelsState.collectAsState()
     val voiceConfig by viewModel.currentVoiceConfig.collectAsState()
 
+    // Phone-GPS actions need ACCESS_FINE_LOCATION. Run the requested action
+    // immediately if already granted, otherwise prompt and run it on grant.
+    val context = LocalContext.current
+    var pendingLocationAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val action = pendingLocationAction
+        pendingLocationAction = null
+        if (granted) action?.invoke()
+        else viewModel.onPhoneGpsPermissionDenied()
+    }
+    val withLocationPermission: (() -> Unit) -> Unit = { action ->
+        val granted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            action()
+        } else {
+            pendingLocationAction = action
+            locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+
+    // Surface each config validation / result message as a transient Toast,
+    // then clear it so the same message can fire again on the next attempt.
+    LaunchedEffect(configStatus) {
+        configStatus?.let { status ->
+            Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
+            viewModel.clearStatus()
+        }
+    }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -91,21 +131,6 @@ fun SettingsScreen(
                         IconButton(onClick = { viewModel.refreshDeviceConfig() }) {
                             Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.settings_refresh_config))
                         }
-                    }
-                }
-            }
-        }
-
-        // ===== Status message =====
-        item {
-            configStatus?.let { status ->
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(status, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                        TextButton(onClick = { viewModel.clearStatus() }) { Text(stringResource(R.string.settings_dismiss)) }
                     }
                 }
             }
@@ -249,9 +274,26 @@ fun SettingsScreen(
                 EnumDropdownSetting("GPS Mode", viewModel.gpsModes, positionState.gpsMode) { viewModel.setPositionGpsMode(it) }
                 Spacer(Modifier.height(8.dp))
                 SwitchSetting("GPS Enabled", positionState.gpsEnabled) { viewModel.setPositionGpsEnabled(it) }
+                if (positionState.gpsEnabled) {
+                    Spacer(Modifier.height(8.dp))
+                    GpsSourceSelector(
+                        selected = positionState.gpsSource,
+                        onSelectDevice = { viewModel.setPositionGpsSource(ConfigViewModel.GpsSource.DEVICE) },
+                        onSelectPhone = { withLocationPermission { viewModel.setPositionGpsSource(ConfigViewModel.GpsSource.PHONE) } },
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 SwitchSetting("Fixed Position", positionState.fixedPosition) { viewModel.setPositionFixed(it) }
                 if (positionState.fixedPosition) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { withLocationPermission { viewModel.applyFixedPositionFromPhone() } },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(Icons.Default.MyLocation, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Use phone GPS as fixed position")
+                    }
                     Spacer(Modifier.height(8.dp))
                     DoubleFieldSetting("Latitude (°)", positionState.fixedLatitude) { viewModel.setPositionFixedLatitude(it) }
                     Spacer(Modifier.height(8.dp))
@@ -739,6 +781,35 @@ private fun ExpandableConfigCard(
                     content()
                 }
             }
+        }
+    }
+}
+
+/**
+ * Two-way selector for the live GPS source while GPS is enabled: the node's
+ * own onboard GPS, or this phone's GPS broadcast to the mesh.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GpsSourceSelector(
+    selected: ConfigViewModel.GpsSource,
+    onSelectDevice: () -> Unit,
+    onSelectPhone: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Text("GPS Source", style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.height(4.dp))
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            SegmentedButton(
+                selected = selected == ConfigViewModel.GpsSource.DEVICE,
+                onClick = onSelectDevice,
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+            ) { Text("Device GPS") }
+            SegmentedButton(
+                selected = selected == ConfigViewModel.GpsSource.PHONE,
+                onClick = onSelectPhone,
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+            ) { Text("Phone GPS") }
         }
     }
 }
