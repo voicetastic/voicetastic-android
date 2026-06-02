@@ -1,6 +1,11 @@
 package re.chasam.voicetastic.ui.map
 
+import android.Manifest
+import android.content.pm.PackageManager
 import android.preference.PreferenceManager
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -14,18 +19,31 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.MapTileProviderBasic
+import org.osmdroid.tileprovider.modules.INetworkAvailablityCheck
+import org.osmdroid.tileprovider.modules.SqlTileWriter
 import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.tileprovider.util.SimpleRegisterReceiver
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
+import androidx.core.content.ContextCompat
+import androidx.core.graphics.drawable.DrawableCompat
+import kotlinx.coroutines.launch
+import re.chasam.voicetastic.R
+import re.chasam.voicetastic.service.PhoneLocationProvider
 import re.chasam.voicetastic.ui.chat.MessagingViewModel
 
 /**
@@ -45,7 +63,64 @@ import re.chasam.voicetastic.ui.chat.MessagingViewModel
 fun MapScreen(messagingViewModel: MessagingViewModel) {
     val nodes by messagingViewModel.nodes.collectAsState()
     val myNodeId by messagingViewModel.myNodeId.collectAsState()
+    val selfNode by messagingViewModel.selfNode.collectAsState()
+    val connectionState by messagingViewModel.connectionState.collectAsState()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val phoneLocation = remember { PhoneLocationProvider(context) }
+
+    // Where to draw the "you" pin. Prefer our node's own reported position;
+    // if the node has no fix (e.g. its GPS is off) fall back to the phone's
+    // location so the user can still see where they are. `selfFromPhone`
+    // drives the marker label so the source is never ambiguous.
+    var selfPoint by remember { mutableStateOf<GeoPoint?>(null) }
+    var selfFromPhone by remember { mutableStateOf(false) }
+    LaunchedEffect(selfNode, connectionState) {
+        val lat = selfNode?.latitudeI
+        val lon = selfNode?.longitudeI
+        if (lat != null && lon != null && (lat != 0 || lon != 0)) {
+            selfPoint = GeoPoint(lat / 1e7, lon / 1e7)
+            selfFromPhone = false
+        } else {
+            // Only consult the phone GPS if location is already granted; we
+            // don't pop a permission dialog just for opening the map (the
+            // "my location" FAB is the explicit opt-in for that).
+            val granted = ContextCompat.checkSelfPermission(
+                context, Manifest.permission.ACCESS_FINE_LOCATION,
+            ) == PackageManager.PERMISSION_GRANTED
+            val fix = if (granted) phoneLocation.currentFix() else null
+            if (fix != null) {
+                selfPoint = GeoPoint(fix.latitude, fix.longitude)
+                selfFromPhone = true
+            } else {
+                selfPoint = null
+            }
+        }
+    }
+
+    // The "my location" FAB falls back to the phone's own GPS when our node
+    // has no fix. That needs ACCESS_FINE_LOCATION: run the action straight
+    // away if granted, otherwise prompt and run it once the grant lands.
+    var pendingLocationAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val action = pendingLocationAction
+        pendingLocationAction = null
+        if (granted) action?.invoke()
+        else Toast.makeText(context, "Location permission denied", Toast.LENGTH_SHORT).show()
+    }
+    val withLocationPermission: (() -> Unit) -> Unit = { action ->
+        val granted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_FINE_LOCATION,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            action()
+        } else {
+            pendingLocationAction = action
+            locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
 
     // osmdroid needs a one-time user-agent + tile cache config. The
     // SharedPreferences-backed `Configuration` is the official entry
@@ -67,8 +142,26 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
     }
 
     val mapView = remember {
-        MapView(context).apply {
-            //setTileSource(TileSourceFactory.MAPNIK)
+        // osmdroid's built-in NetworkAvailabliltyCheck reports "no
+        // network" on some de-Googled / custom ROMs (e.g. /e/OS),
+        // so it silently skips every tile download and renders a blank
+        // map. We hold the INTERNET permission and the HTTP request is
+        // itself the real connectivity test, so we build the default
+        // provider chain with a check that always reports available.
+        val alwaysOnline = object : INetworkAvailablityCheck {
+            override fun getNetworkAvailable() = true
+            override fun getWiFiNetworkAvailable() = true
+            override fun getCellularDataNetworkAvailable() = true
+            override fun getRouteToPathExists(hostAddress: Int) = true
+        }
+        val tileProvider = MapTileProviderBasic(
+            SimpleRegisterReceiver(context),
+            alwaysOnline,
+            TileSourceFactory.MAPNIK,
+            context,
+            SqlTileWriter(),
+        )
+        MapView(context, tileProvider).apply {
             setMultiTouchControls(true)
             controller.setZoom(2.0)
             controller.setCenter(GeoPoint(20.0, 0.0))
@@ -98,7 +191,12 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                     // each NodeInfo update is cheaper than diffing.
                     mv.overlays.clear()
                     val points = mutableListOf<GeoPoint>()
+                    val selfId = selfNode?.nodeId ?: myNodeId
                     for (node in nodes) {
+                        // Our own node is drawn separately below (from
+                        // `selfPoint`, which also covers the no-GPS fallback),
+                        // so skip it here to avoid a duplicate default marker.
+                        if (selfId != null && node.nodeId == selfId) continue
                         val lat = node.latitudeI ?: continue
                         val lon = node.longitudeI ?: continue
                         // (0, 0) is the Meshtastic "unknown position"
@@ -122,6 +220,34 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                             mv.overlays.add(this)
                         }
                     }
+                    // The "you" pin: tinted by link state (green = connected,
+                    // grey otherwise). Sourced from our node's position, or the
+                    // phone GPS when the node reports none.
+                    selfPoint?.let { sp ->
+                        points += sp
+                        val name = selfNode?.longName?.ifBlank { null }
+                            ?: selfNode?.shortName?.ifBlank { null }
+                            ?: selfNode?.nodeId ?: "You"
+                        val tint = if (connectionState == "CONNECTED") {
+                            0xFF2E7D32.toInt()
+                        } else {
+                            0xFF9E9E9E.toInt()
+                        }
+                        Marker(mv).apply {
+                            position = sp
+                            title = "$name (you)"
+                            snippet = if (selfFromPhone) {
+                                "Phone GPS (node reports no position)"
+                            } else {
+                                selfNode?.nodeId ?: ""
+                            }
+                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                            icon = ContextCompat.getDrawable(context, R.drawable.ic_map_self_pin)
+                                ?.mutate()
+                                ?.also { DrawableCompat.setTint(it, tint) }
+                            mv.overlays.add(this)
+                        }
+                    }
                     if (points.isNotEmpty() && mv.zoomLevelDouble <= 2.5) {
                         val bb = org.osmdroid.util.BoundingBox.fromGeoPointsSafe(points)
                         mv.zoomToBoundingBox(bb, true, 80)
@@ -135,8 +261,32 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                     val lat = myNode?.latitudeI
                     val lon = myNode?.longitudeI
                     if (lat != null && lon != null && (lat != 0 || lon != 0)) {
+                        // Our node reported a position: use it directly.
                         mapView.controller.setCenter(GeoPoint(lat / 1e7, lon / 1e7))
                         mapView.controller.setZoom(16.0)
+                    } else {
+                        // No node fix: fall back to the phone's own GPS, asking
+                        // for location permission first if we don't have it.
+                        withLocationPermission {
+                            scope.launch {
+                                val fix = phoneLocation.currentFix()
+                                if (fix != null) {
+                                    mapView.controller.setCenter(GeoPoint(fix.latitude, fix.longitude))
+                                    mapView.controller.setZoom(16.0)
+                                    Toast.makeText(
+                                        context,
+                                        "No position from your node: using phone GPS",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                } else {
+                                    Toast.makeText(
+                                        context,
+                                        "No position available from your node or phone GPS",
+                                        Toast.LENGTH_SHORT,
+                                    ).show()
+                                }
+                            }
+                        }
                     }
                 },
                 modifier = Modifier.padding(16.dp).align(androidx.compose.ui.Alignment.BottomEnd),

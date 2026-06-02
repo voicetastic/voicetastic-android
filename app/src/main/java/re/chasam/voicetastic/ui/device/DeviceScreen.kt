@@ -30,7 +30,6 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
     val bleDevices by meshServiceManager.discoveredDevices.collectAsState()
     val isScanning by meshServiceManager.isScanning.collectAsState()
     val connectionState by meshServiceManager.connectionState.collectAsState()
-    val myNodeId by meshServiceManager.myNodeId.collectAsState()
     val nodes by meshServiceManager.nodes.collectAsState()
     val activeTransport by meshServiceManager.activeTransport.collectAsState()
     val usbDeviceConnected by meshServiceManager.usbConnectedDevice.collectAsState()
@@ -58,48 +57,6 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
             .fillMaxSize()
             .padding(16.dp)
     ) {
-        // ===== Connection status =====
-        Card(
-            colors = CardDefaults.cardColors(
-                containerColor = when (connectionState) {
-                    "CONNECTED" -> MaterialTheme.colorScheme.primaryContainer
-                    "CONNECTING" -> MaterialTheme.colorScheme.tertiaryContainer
-                    else -> MaterialTheme.colorScheme.errorContainer
-                }
-            ),
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                Text(
-                    text = when (connectionState) {
-                        "CONNECTED" -> stringResource(R.string.device_connected)
-                        "CONNECTING" -> stringResource(R.string.device_connecting)
-                        else -> stringResource(R.string.device_not_connected)
-                    },
-                    style = MaterialTheme.typography.titleMedium
-                )
-                if (connectionState == "CONNECTED") {
-                    myNodeId?.let { Text(stringResource(R.string.device_my_id, it), style = MaterialTheme.typography.bodySmall) }
-                    Text(
-                        stringResource(R.string.device_transport, activeTransport.name),
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        stringResource(R.string.device_nodes_count, nodes.size),
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedButton(onClick = { meshServiceManager.disconnect() }) {
-                        Icon(Icons.Default.LinkOff, contentDescription = null)
-                        Spacer(Modifier.width(8.dp))
-                        Text(stringResource(R.string.device_disconnect))
-                    }
-                }
-            }
-        }
-
-        Spacer(Modifier.height(16.dp))
-
         // ===== Unified device list =====
         if (connectionState != "CONNECTED") {
             Row(

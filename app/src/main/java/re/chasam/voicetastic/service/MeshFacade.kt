@@ -28,6 +28,7 @@ interface MeshFacade {
     val activeTransport: StateFlow<TransportType>
     val isConnected: Boolean
     val myNodeId: StateFlow<String?>
+    val selfNode: StateFlow<MeshNode?>
     val firmwareVersion: StateFlow<String?>
     val nodes: StateFlow<List<MeshNode>>
     val isNodeScanInProgress: StateFlow<Boolean>

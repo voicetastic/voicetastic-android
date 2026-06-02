@@ -1,6 +1,19 @@
 package re.chasam.voicetastic.navigation
 
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Devices
@@ -8,10 +21,15 @@ import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.dp
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
@@ -45,16 +63,72 @@ fun AppNavigation(
     val navController = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = navBackStackEntry?.destination?.route
+    val connectionState by meshServiceManager.connectionState.collectAsState()
+    val selfNode by meshServiceManager.selfNode.collectAsState()
+
+    val logoColor = when (connectionState) {
+        "CONNECTED" -> MaterialTheme.colorScheme.primaryContainer
+        "CONNECTING" -> MaterialTheme.colorScheme.tertiaryContainer
+        else -> MaterialTheme.colorScheme.errorContainer
+    }
+
+    val shimmerProgress by animateFloatAsState(
+        targetValue = if (connectionState == "CONNECTING") 1f else 0f,
+        animationSpec = infiniteRepeatable(tween(durationMillis = 1500)),
+        label = "shimmerAnimation"
+    )
+
+    val logoTint = if (connectionState == "CONNECTING") {
+        lerp(logoColor, logoColor.copy(alpha = 0.4f), shimmerProgress)
+    } else {
+        logoColor
+    }
 
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Voicetastic") },
-                navigationIcon = {
-                    Icon(
-                        painter = painterResource(R.drawable.ic_launcher_foreground),
-                        contentDescription = null
-                    )
+                title = {
+                    val node = selfNode
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .pointerInput(Unit) {
+                                    detectTapGestures(
+                                        onLongPress = { meshServiceManager.disconnect() }
+                                    )
+                                }
+                        ) {
+                            Icon(
+                                painter = painterResource(R.drawable.ic_launcher_foreground),
+                                contentDescription = null,
+                                modifier = Modifier.size(48.dp),
+                                tint = logoTint
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(16.dp))
+                        if (connectionState == "CONNECTED" && node != null) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    node.longName,
+                                    style = MaterialTheme.typography.bodyLarge
+                                )
+                                Text(
+                                    node.nodeId,
+                                    style = MaterialTheme.typography.labelSmall
+                                )
+                            }
+                        } else {
+                            Text(
+                                stringResource(R.string.app_name),
+                                style = MaterialTheme.typography.titleMedium
+                            )
+                        }
+                    }
                 }
             )
         },
