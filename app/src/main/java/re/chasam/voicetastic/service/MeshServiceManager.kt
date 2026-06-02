@@ -169,6 +169,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         _networkConfig.value = null
         _displayConfig.value = null
         _bluetoothConfig.value = null
+        _mqttConfig.value = null
         _channels.value = emptyList()
         _owner.value = null
         _moduleConfigs.value = emptyMap()
@@ -229,6 +230,9 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
     private val _bluetoothConfig = MutableStateFlow<MeshProtos.Config.BluetoothConfig?>(null)
     override val bluetoothConfig: StateFlow<MeshProtos.Config.BluetoothConfig?> = _bluetoothConfig.asStateFlow()
+
+    private val _mqttConfig = MutableStateFlow<MeshProtos.ModuleConfig.MQTTConfig?>(null)
+    override val mqttConfig: StateFlow<MeshProtos.ModuleConfig.MQTTConfig?> = _mqttConfig.asStateFlow()
 
     private val _channels = MutableStateFlow<List<MeshProtos.Channel>>(emptyList())
     override val channels: StateFlow<List<MeshProtos.Channel>> = _channels.asStateFlow()
@@ -411,6 +415,17 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
             override fun onConfig(encoded: ByteArray) {
                 runCatching { MeshProtos.Config.parseFrom(encoded) }
                     .onSuccess { handleConfig(it) }
+            }
+
+            override fun onModuleConfig(encoded: ByteArray) {
+                runCatching { MeshProtos.ModuleConfig.parseFrom(encoded) }
+                    .onSuccess { mc ->
+                        // Only the MQTT variant has a UI today; the rest
+                        // are swallowed (Telemetry, Serial, etc.).
+                        if (mc.hasMqtt()) {
+                            _mqttConfig.value = mc.mqtt
+                        }
+                    }
             }
 
             override fun onChannel(encoded: ByteArray) {

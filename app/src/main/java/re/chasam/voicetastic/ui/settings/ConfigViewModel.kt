@@ -182,6 +182,27 @@ class ConfigViewModel(
 
     val pairingModes: List<String> = enumNames(MeshProtos.Config.BluetoothConfig.PairingMode.values())
 
+    // ========================  MQTT MODULE  ========================
+
+    data class MqttUiState(
+        val enabled: Boolean = false,
+        val address: String = "",
+        val username: String = "",
+        val password: String = "",
+        val root: String = "",
+        val encryptionEnabled: Boolean = true,
+        val jsonEnabled: Boolean = false,
+        val tlsEnabled: Boolean = false,
+        val proxyToClientEnabled: Boolean = false,
+        val mapReportingEnabled: Boolean = false,
+        val mapPublishIntervalSecs: Int = 0,
+        val mapPositionPrecision: Int = 0,
+        val mapShouldReportLocation: Boolean = false,
+    )
+
+    private val _mqttState = MutableStateFlow(MqttUiState())
+    val mqttState: StateFlow<MqttUiState> = _mqttState.asStateFlow()
+
     // ========================  CHANNELS  ========================
 
     data class ChannelUiState(
@@ -259,6 +280,9 @@ class ConfigViewModel(
             meshService.bluetoothConfig.collect { bt -> if (bt != null && !isDirty("bluetooth")) updateBluetoothFromProto(bt) }
         }
         viewModelScope.launch {
+            meshService.mqttConfig.collect { m -> if (m != null && !isDirty("mqtt")) updateMqttFromProto(m) }
+        }
+        viewModelScope.launch {
             meshService.owner.collect { user ->
                 if (user != null && !isDirty("owner")) {
                     _ownerState.value = OwnerUiState(
@@ -301,6 +325,7 @@ class ConfigViewModel(
         meshService.networkConfig.value?.let { if (!isDirty("network")) updateNetworkFromProto(it) }
         meshService.displayConfig.value?.let { if (!isDirty("display")) updateDisplayFromProto(it) }
         meshService.bluetoothConfig.value?.let { if (!isDirty("bluetooth")) updateBluetoothFromProto(it) }
+        meshService.mqttConfig.value?.let { if (!isDirty("mqtt")) updateMqttFromProto(it) }
         meshService.owner.value?.let { user ->
             if (!isDirty("owner")) {
                 _ownerState.value = OwnerUiState(
@@ -431,6 +456,25 @@ class ConfigViewModel(
         )
     }
 
+    private fun updateMqttFromProto(m: MeshProtos.ModuleConfig.MQTTConfig) {
+        val map = if (m.hasMapReportSettings()) m.mapReportSettings else null
+        _mqttState.value = MqttUiState(
+            enabled = m.enabled,
+            address = m.address,
+            username = m.username,
+            password = m.password,
+            root = m.root,
+            encryptionEnabled = m.encryptionEnabled,
+            jsonEnabled = m.jsonEnabled,
+            tlsEnabled = m.tlsEnabled,
+            proxyToClientEnabled = m.proxyToClientEnabled,
+            mapReportingEnabled = m.mapReportingEnabled,
+            mapPublishIntervalSecs = map?.publishIntervalSecs ?: 0,
+            mapPositionPrecision = map?.positionPrecision ?: 0,
+            mapShouldReportLocation = map?.shouldReportLocation ?: false,
+        )
+    }
+
     // ========================  SETTERS  ========================
     // Each setter marks its section dirty so subsequent device pushes don't
     // overwrite the user's in-progress edits.
@@ -517,6 +561,21 @@ class ConfigViewModel(
     fun setBluetoothEnabled(v: Boolean) { markDirty("bluetooth"); _bluetoothState.value = _bluetoothState.value.copy(enabled = v) }
     fun setBluetoothMode(mode: String) { markDirty("bluetooth"); _bluetoothState.value = _bluetoothState.value.copy(mode = mode) }
     fun setBluetoothFixedPin(v: Int) { markDirty("bluetooth"); _bluetoothState.value = _bluetoothState.value.copy(fixedPin = v) }
+
+    // --- MQTT module ---
+    fun setMqttEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(enabled = v) }
+    fun setMqttAddress(v: String) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(address = v) }
+    fun setMqttUsername(v: String) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(username = v) }
+    fun setMqttPassword(v: String) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(password = v) }
+    fun setMqttRoot(v: String) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(root = v) }
+    fun setMqttEncryptionEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(encryptionEnabled = v) }
+    fun setMqttJsonEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(jsonEnabled = v) }
+    fun setMqttTlsEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(tlsEnabled = v) }
+    fun setMqttProxyToClientEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(proxyToClientEnabled = v) }
+    fun setMqttMapReportingEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(mapReportingEnabled = v) }
+    fun setMqttMapPublishIntervalSecs(v: Int) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(mapPublishIntervalSecs = v) }
+    fun setMqttMapPositionPrecision(v: Int) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(mapPositionPrecision = v) }
+    fun setMqttMapShouldReportLocation(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(mapShouldReportLocation = v) }
 
     // --- Channel ---
     fun setChannelName(index: Int, name: String) {
@@ -803,6 +862,36 @@ class ConfigViewModel(
         val ok = meshService.writeConfig(config)
         if (ok) dirty.remove("bluetooth")
         _configStatus.value = if (ok) "Bluetooth config sent" else "Failed to send bluetooth config"
+    }
+
+    fun applyMqttConfig() {
+        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (meshService.mqttConfig.value == null) {
+            _configStatus.value = "MQTT config not yet loaded — refresh first"; return
+        }
+        val s = _mqttState.value
+        val mqttBuilder = MeshProtos.ModuleConfig.MQTTConfig.newBuilder()
+            .setEnabled(s.enabled)
+            .setAddress(s.address)
+            .setUsername(s.username)
+            .setPassword(s.password)
+            .setRoot(s.root)
+            .setEncryptionEnabled(s.encryptionEnabled)
+            .setJsonEnabled(s.jsonEnabled)
+            .setTlsEnabled(s.tlsEnabled)
+            .setProxyToClientEnabled(s.proxyToClientEnabled)
+            .setMapReportingEnabled(s.mapReportingEnabled)
+        if (s.mapReportingEnabled) {
+            mqttBuilder.mapReportSettings = MeshProtos.ModuleConfig.MapReportSettings.newBuilder()
+                .setPublishIntervalSecs(s.mapPublishIntervalSecs)
+                .setPositionPrecision(s.mapPositionPrecision)
+                .setShouldReportLocation(s.mapShouldReportLocation)
+                .build()
+        }
+        val mc = MeshProtos.ModuleConfig.newBuilder().setMqtt(mqttBuilder).build()
+        val ok = meshService.writeModuleConfig(mc)
+        if (ok) dirty.remove("mqtt")
+        _configStatus.value = if (ok) "MQTT module config sent" else "Failed to send MQTT module config"
     }
 
     fun applyChannel(index: Int) {

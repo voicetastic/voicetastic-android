@@ -70,6 +70,13 @@ interface MeshFacade {
     val networkConfig: StateFlow<MeshProtos.Config.NetworkConfig?>
     val displayConfig: StateFlow<MeshProtos.Config.DisplayConfig?>
     val bluetoothConfig: StateFlow<MeshProtos.Config.BluetoothConfig?>
+    /**
+     * MQTT module-config snapshot, when the firmware has reported one
+     * during the want-config burst. Currently the only module-config
+     * variant the Kotlin side surfaces; other variants (Telemetry,
+     * Serial, RangeTest, …) are silently dropped by the bridge.
+     */
+    val mqttConfig: StateFlow<MeshProtos.ModuleConfig.MQTTConfig?>
     val channels: StateFlow<List<MeshProtos.Channel>>
     val owner: StateFlow<MeshProtos.User?>
     val moduleConfigs: StateFlow<Map<String, MeshProtos.ModuleConfig>>

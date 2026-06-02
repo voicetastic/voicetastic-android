@@ -40,6 +40,7 @@ class ConfigurationSteps {
         every { meshService.networkConfig } returns MutableStateFlow(null)
         every { meshService.displayConfig } returns MutableStateFlow(null)
         every { meshService.bluetoothConfig } returns MutableStateFlow(null)
+        every { meshService.mqttConfig } returns MutableStateFlow(null)
         every { meshService.owner } returns MutableStateFlow(null)
         every { meshService.channels } returns MutableStateFlow(emptyList())
         every { meshService.moduleConfigs } returns MutableStateFlow(emptyMap())

@@ -81,6 +81,7 @@
     <string name="settings_network">Network</string>
     <string name="settings_display">Display</string>
     <string name="settings_bluetooth">Bluetooth</string>
+    <string name="settings_mqtt">MQTT gateway</string>
     <string name="settings_channels">Channels</string>
     <string name="settings_voice">Voice</string>
     <string name="settings_device_actions">Device Actions</string>
@@ -102,6 +103,7 @@
     <string name="settings_apply_network">Apply Network Config</string>
     <string name="settings_apply_display">Apply Display Config</string>
     <string name="settings_apply_bluetooth">Apply Bluetooth Config</string>
+    <string name="settings_apply_mqtt">Apply MQTT Module Config</string>
     <string name="settings_no_channels">No channels received yet</string>
     <string name="settings_expand">Expand</string>
     <string name="settings_collapse">Collapse</string>

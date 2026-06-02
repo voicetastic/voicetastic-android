@@ -52,6 +52,7 @@ fun SettingsScreen(
     val networkState by viewModel.networkState.collectAsState()
     val displayState by viewModel.displayState.collectAsState()
     val bluetoothState by viewModel.bluetoothState.collectAsState()
+    val mqttState by viewModel.mqttState.collectAsState()
     val channelsState by viewModel.channelsState.collectAsState()
     val voiceConfig by viewModel.currentVoiceConfig.collectAsState()
 
@@ -378,6 +379,69 @@ fun SettingsScreen(
                 Spacer(Modifier.height(12.dp))
                 Button(onClick = { viewModel.applyBluetoothConfig() }, modifier = Modifier.fillMaxWidth()) {
                     Text(stringResource(R.string.settings_apply_bluetooth))
+                }
+            }
+
+            // ===== MQTT module =====
+            ExpandableConfigCard(title = stringResource(R.string.settings_mqtt), icon = Icons.Default.Cloud) {
+                SwitchSetting("Enabled", mqttState.enabled) { viewModel.setMqttEnabled(it) }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = mqttState.address,
+                    onValueChange = { viewModel.setMqttAddress(it) },
+                    label = { Text("Server address") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = mqttState.username,
+                    onValueChange = { viewModel.setMqttUsername(it) },
+                    label = { Text("Username") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                Spacer(Modifier.height(8.dp))
+                SecretFieldSetting("Password", mqttState.password) { viewModel.setMqttPassword(it) }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = mqttState.root,
+                    onValueChange = { viewModel.setMqttRoot(it) },
+                    label = { Text("Root topic") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                Spacer(Modifier.height(8.dp))
+                SwitchSetting("Encrypted packets", mqttState.encryptionEnabled) {
+                    viewModel.setMqttEncryptionEnabled(it)
+                }
+                SwitchSetting("JSON packets", mqttState.jsonEnabled) { viewModel.setMqttJsonEnabled(it) }
+                SwitchSetting("Use TLS", mqttState.tlsEnabled) { viewModel.setMqttTlsEnabled(it) }
+                SwitchSetting("Proxy through client", mqttState.proxyToClientEnabled) {
+                    viewModel.setMqttProxyToClientEnabled(it)
+                }
+                SwitchSetting("Report to public mesh map", mqttState.mapReportingEnabled) {
+                    viewModel.setMqttMapReportingEnabled(it)
+                }
+                if (mqttState.mapReportingEnabled) {
+                    Spacer(Modifier.height(8.dp))
+                    NumberFieldSetting(
+                        "Map publish interval (s)",
+                        mqttState.mapPublishIntervalSecs,
+                    ) { viewModel.setMqttMapPublishIntervalSecs(it) }
+                    Spacer(Modifier.height(8.dp))
+                    NumberFieldSetting(
+                        "Map position precision (bits)",
+                        mqttState.mapPositionPrecision,
+                    ) { viewModel.setMqttMapPositionPrecision(it) }
+                    SwitchSetting(
+                        "Opt-in: report location",
+                        mqttState.mapShouldReportLocation,
+                    ) { viewModel.setMqttMapShouldReportLocation(it) }
+                }
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = { viewModel.applyMqttConfig() }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.settings_apply_mqtt))
                 }
             }
 
