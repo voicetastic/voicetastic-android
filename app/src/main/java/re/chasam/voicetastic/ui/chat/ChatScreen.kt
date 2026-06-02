@@ -2,6 +2,8 @@ package re.chasam.voicetastic.ui.chat
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -20,6 +22,7 @@ import androidx.compose.ui.unit.sp
 import re.chasam.voicetastic.R
 import kotlinx.coroutines.launch
 import re.chasam.voicetastic.model.ChatItem
+import re.chasam.voicetastic.service.DeliveryStatus
 import re.chasam.voicetastic.model.MeshNode
 import java.text.SimpleDateFormat
 import java.util.*
@@ -29,11 +32,14 @@ import java.util.*
 fun ChatScreen(viewModel: MessagingViewModel) {
     val chatItems by viewModel.chatItems.collectAsState()
     val nodes by viewModel.nodes.collectAsState()
+    val nodeHistory by viewModel.nodeHistory.collectAsState()
     val selectedNode by viewModel.selectedNode.collectAsState()
     val selectedChannel by viewModel.selectedChannel.collectAsState()
     val availableChannels by viewModel.availableChannels.collectAsState()
     val connectionState by viewModel.connectionState.collectAsState()
     val isRecording by viewModel.isRecording.collectAsState()
+    val previewFile by viewModel.previewFile.collectAsState()
+    val isPreviewPlaying by viewModel.isPreviewPlaying.collectAsState()
     val isPlaying by viewModel.isPlaying.collectAsState()
     val playingItemId by viewModel.playingItemId.collectAsState()
     val sendingProgress by viewModel.sendingProgress.collectAsState()
@@ -160,7 +166,7 @@ fun ChatScreen(viewModel: MessagingViewModel) {
             modifier = Modifier.fillMaxWidth()
         ) {
             if (isRecording) {
-                // Recording mode UI
+                // Recording mode UI: Stop drops the clip into Preview.
                 Row(
                     modifier = Modifier
                         .padding(12.dp)
@@ -178,8 +184,42 @@ fun ChatScreen(viewModel: MessagingViewModel) {
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.error
                     )
+                    FilledTonalButton(onClick = { viewModel.stopRecordingToPreview() }) {
+                        Icon(Icons.Default.Stop, contentDescription = stringResource(R.string.chat_stop))
+                        Spacer(Modifier.width(4.dp))
+                        Text(stringResource(R.string.chat_stop))
+                    }
+                }
+            } else if (previewFile != null) {
+                // Preview mode: Listen / Delete / Send the captured clip
+                // before transmitting. Mirrors desktop's VoiceCompose::Preview.
+                Row(
+                    modifier = Modifier
+                        .padding(12.dp)
+                        .fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    OutlinedButton(onClick = { viewModel.discardPreview() }) {
+                        Icon(Icons.Default.Delete, contentDescription = stringResource(R.string.chat_preview_delete))
+                        Spacer(Modifier.width(4.dp))
+                        Text(stringResource(R.string.chat_preview_delete))
+                    }
+                    if (isPreviewPlaying) {
+                        OutlinedButton(onClick = { viewModel.stopPreviewPlayback() }) {
+                            Icon(Icons.Default.Stop, contentDescription = stringResource(R.string.chat_stop))
+                            Spacer(Modifier.width(4.dp))
+                            Text(stringResource(R.string.chat_stop))
+                        }
+                    } else {
+                        OutlinedButton(onClick = { viewModel.playPreview() }) {
+                            Icon(Icons.Default.PlayArrow, contentDescription = stringResource(R.string.chat_preview_listen))
+                            Spacer(Modifier.width(4.dp))
+                            Text(stringResource(R.string.chat_preview_listen))
+                        }
+                    }
                     FilledTonalButton(
-                        onClick = { viewModel.stopRecordingAndSend() },
+                        onClick = { viewModel.sendPreview() },
                         colors = ButtonDefaults.filledTonalButtonColors(
                             containerColor = MaterialTheme.colorScheme.primaryContainer
                         )
@@ -246,6 +286,7 @@ fun ChatScreen(viewModel: MessagingViewModel) {
         NodePickerDialog(
             nodes = nodes,
             selectedNode = selectedNode,
+            nodeHistory = nodeHistory,
             onNodeSelected = { node ->
                 viewModel.selectNode(node)
                 showNodePicker = false
@@ -299,12 +340,30 @@ private fun TextMessageBubble(item: ChatItem.Text) {
                     text = item.text,
                     style = MaterialTheme.typography.bodyMedium
                 )
-                Text(
-                    text = timeFormat.format(Date(item.timestamp)),
-                    style = MaterialTheme.typography.labelSmall,
-                    fontSize = 10.sp,
-                    modifier = Modifier.align(Alignment.End)
-                )
+                Row(
+                    modifier = Modifier.align(Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = timeFormat.format(Date(item.timestamp)),
+                        style = MaterialTheme.typography.labelSmall,
+                        fontSize = 10.sp,
+                    )
+                    item.deliveryStatus?.let { status ->
+                        Spacer(Modifier.width(4.dp))
+                        Text(
+                            text = when (status) {
+                                DeliveryStatus.Pending -> "⏳"
+                                DeliveryStatus.Delivered -> "✓"
+                                DeliveryStatus.Failed -> "❌"
+                                DeliveryStatus.TimedOut -> "⏱"
+                                DeliveryStatus.Cancelled -> "⊘"
+                            },
+                            style = MaterialTheme.typography.labelSmall,
+                            fontSize = 10.sp,
+                        )
+                    }
+                }
             }
         }
     }
@@ -379,9 +438,11 @@ private fun VoiceMessageBubble(
 private fun NodePickerDialog(
     nodes: List<MeshNode>,
     selectedNode: MeshNode?,
+    nodeHistory: Map<Int, List<re.chasam.voicetastic.service.NodeSample>>,
     onNodeSelected: (MeshNode?) -> Unit,
     onDismiss: () -> Unit
 ) {
+    var detailNode by remember { mutableStateOf<MeshNode?>(null) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(stringResource(R.string.chat_send_to_title)) },
@@ -404,6 +465,16 @@ private fun NodePickerDialog(
                         headlineContent = { Text(node.longName) },
                         supportingContent = { Text(node.nodeId) },
                         leadingContent = { Text(node.shortName, fontWeight = FontWeight.Bold) },
+                        // Info button opens the detail dialog; the row's
+                        // body still selects the node for messaging.
+                        trailingContent = {
+                            IconButton(onClick = { detailNode = node }) {
+                                Icon(
+                                    Icons.Default.Info,
+                                    contentDescription = stringResource(R.string.chat_node_detail_title),
+                                )
+                            }
+                        },
                         modifier = Modifier.clickable { onNodeSelected(node) },
                         colors = ListItemDefaults.colors(
                             containerColor = if (selectedNode?.nodeId == node.nodeId)
@@ -419,6 +490,113 @@ private fun NodePickerDialog(
             TextButton(onClick = onDismiss) { Text(stringResource(R.string.chat_cancel)) }
         }
     )
+    detailNode?.let { node ->
+        val samples = re.chasam.voicetastic.core.NodeIds.nodeIdToNum(node.nodeId)
+            ?.let { nodeHistory[it] }
+            ?: emptyList()
+        NodeDetailDialog(node = node, samples = samples, onDismiss = { detailNode = null })
+    }
+}
+
+@Composable
+private fun NodeDetailDialog(
+    node: MeshNode,
+    samples: List<re.chasam.voicetastic.service.NodeSample>,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(node.longName.ifBlank { node.nodeId }) },
+        text = {
+            // A scrollable column of label / value pairs so the dialog
+            // never overflows on devices with smaller heights.
+            Column(
+                modifier = Modifier.verticalScroll(rememberScrollState())
+            ) {
+                NodeDetailRow("ID", node.nodeId)
+                NodeDetailRow("Short name", node.shortName)
+                NodeDetailRow("HW model", node.hwModel.toString())
+                NodeDetailRow("Role", node.role.toString())
+                if (node.isLicensed) NodeDetailRow("HAM", "yes")
+                NodeDetailRow("Channel", node.channel.toString())
+                if (node.lastHeard != 0L) NodeDetailRow(
+                    "Last heard",
+                    "${formatRelativeAge(node.lastHeard)} (${node.lastHeard})",
+                )
+                node.snr?.let { NodeDetailRow("SNR", "%.1f dB".format(it)) }
+                if (node.latitudeI != null && node.longitudeI != null) {
+                    NodeDetailRow(
+                        "Position",
+                        "%.5f, %.5f".format(node.latitudeI / 1e7, node.longitudeI / 1e7),
+                    )
+                }
+                node.altitude?.let { NodeDetailRow("Altitude", "$it m") }
+                node.batteryLevel?.let {
+                    NodeDetailRow("Battery", if (it == 101) "AC" else "$it%")
+                }
+                node.voltage?.let { NodeDetailRow("Voltage", "%.2f V".format(it)) }
+                node.channelUtilization?.let { NodeDetailRow("Ch util", "%.1f%%".format(it)) }
+                node.airUtilTx?.let { NodeDetailRow("Air util TX", "%.1f%%".format(it)) }
+                node.uptimeSeconds?.let { NodeDetailRow("Uptime", formatUptime(it)) }
+                if (node.viaMqtt) NodeDetailRow("Via MQTT", "yes")
+                if (node.isFavorite) NodeDetailRow("Favorite", "yes")
+                if (samples.size >= 2) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Trends",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    val battery = samples.mapNotNull { it.battery?.toFloat() }
+                    if (battery.size >= 2) {
+                        SparklineRow("Battery", battery, lo = 0f, hi = 100f, color = MaterialTheme.colorScheme.primary)
+                    }
+                    val snr = samples.map { it.snr }
+                    SparklineRow("SNR", snr, lo = -20f, hi = 20f, color = MaterialTheme.colorScheme.secondary)
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.chat_close)) }
+        },
+    )
+}
+
+@Composable
+private fun NodeDetailRow(label: String, value: String) {
+    Row(modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp)) {
+        Text(
+            text = label,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.width(112.dp),
+        )
+        Text(text = value, style = MaterialTheme.typography.bodyMedium)
+    }
+}
+
+private fun formatRelativeAge(lastHeard: Long): String {
+    if (lastHeard == 0L) return "—"
+    val now = System.currentTimeMillis() / 1000L
+    val age = (now - lastHeard).coerceAtLeast(0)
+    return when {
+        age < 60 -> "${age}s ago"
+        age < 3600 -> "${age / 60}m ago"
+        age < 86_400 -> "${age / 3600}h ago"
+        else -> "${age / 86_400}d ago"
+    }
+}
+
+private fun formatUptime(secs: Int): String {
+    val s = secs % 60
+    val m = (secs / 60) % 60
+    val h = (secs / 3600) % 24
+    val d = secs / 86_400
+    return when {
+        d > 0 -> "${d}d ${h}h"
+        h > 0 -> "${h}h ${m}m"
+        m > 0 -> "${m}m ${s}s"
+        else -> "${s}s"
+    }
 }
 
 @Composable
@@ -454,3 +632,50 @@ private fun ChannelPickerDialog(
     )
 }
 
+
+@Composable
+private fun SparklineRow(
+    label: String,
+    values: List<Float>,
+    lo: Float,
+    hi: Float,
+    color: androidx.compose.ui.graphics.Color,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.width(112.dp),
+        )
+        androidx.compose.foundation.Canvas(
+            modifier = Modifier
+                .height(24.dp)
+                .width(160.dp)
+        ) {
+            val span = (hi - lo).coerceAtLeast(0.0001f)
+            val w = size.width
+            val h = size.height
+            // Background frame
+            drawRect(
+                color = color.copy(alpha = 0.25f),
+                size = size,
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1f),
+            )
+            if (values.size < 2) return@Canvas
+            val step = w / (values.size - 1).coerceAtLeast(1)
+            var prev: androidx.compose.ui.geometry.Offset? = null
+            values.forEachIndexed { i, v ->
+                val norm = ((v - lo) / span).coerceIn(0f, 1f)
+                val pt = androidx.compose.ui.geometry.Offset(step * i, h - norm * h)
+                prev?.let {
+                    drawLine(color = color, start = it, end = pt, strokeWidth = 2f)
+                }
+                prev = pt
+            }
+        }
+    }
+}

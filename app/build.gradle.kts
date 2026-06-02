@@ -364,6 +364,11 @@ dependencies {
     // UniFFI Kotlin bindings runtime (loads libvoicetastic.so via JNA).
     implementation(libs.jna) { artifact { type = "aar" } }
 
+    // osmdroid powers the Map screen (OSM tile renderer + MapView).
+    // Pinned to a recent stable release; needs INTERNET permission
+    // for tile downloads, which the manifest already grants.
+    implementation("org.osmdroid:osmdroid-android:6.1.20")
+
     // Unit tests (Kotest + Cucumber)
     testImplementation(libs.junit)
     testImplementation(libs.kotest.runner)

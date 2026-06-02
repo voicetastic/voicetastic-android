@@ -1,8 +1,15 @@
 package re.chasam.voicetastic.ui.settings
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
@@ -12,7 +19,9 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.core.content.ContextCompat
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -22,6 +31,9 @@ import re.chasam.voicetastic.model.AmrNbBitrate
 import re.chasam.voicetastic.model.Codec2Mode
 import re.chasam.voicetastic.model.ThemePreference
 import re.chasam.voicetastic.model.VoiceCodecChoice
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * Destructive device-side actions that must be confirmed before firing.
@@ -29,7 +41,7 @@ import re.chasam.voicetastic.model.VoiceCodecChoice
  * dialog is open doesn't dismiss it (and doesn't accidentally re-fire
  * the action either).
  */
-private enum class PendingDeviceAction { Reboot, FactoryReset }
+private enum class PendingDeviceAction { Reboot, ResetNodeDb, FactoryReset }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -52,8 +64,42 @@ fun SettingsScreen(
     val networkState by viewModel.networkState.collectAsState()
     val displayState by viewModel.displayState.collectAsState()
     val bluetoothState by viewModel.bluetoothState.collectAsState()
+    val mqttState by viewModel.mqttState.collectAsState()
     val channelsState by viewModel.channelsState.collectAsState()
     val voiceConfig by viewModel.currentVoiceConfig.collectAsState()
+
+    // Phone-GPS actions need ACCESS_FINE_LOCATION. Run the requested action
+    // immediately if already granted, otherwise prompt and run it on grant.
+    val context = LocalContext.current
+    var pendingLocationAction by remember { mutableStateOf<(() -> Unit)?>(null) }
+    val locationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        val action = pendingLocationAction
+        pendingLocationAction = null
+        if (granted) action?.invoke()
+        else viewModel.onPhoneGpsPermissionDenied()
+    }
+    val withLocationPermission: (() -> Unit) -> Unit = { action ->
+        val granted = ContextCompat.checkSelfPermission(
+            context, Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        if (granted) {
+            action()
+        } else {
+            pendingLocationAction = action
+            locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+    }
+
+    // Surface each config validation / result message as a transient Toast,
+    // then clear it so the same message can fire again on the next attempt.
+    LaunchedEffect(configStatus) {
+        configStatus?.let { status ->
+            Toast.makeText(context, status, Toast.LENGTH_SHORT).show()
+            viewModel.clearStatus()
+        }
+    }
 
     LazyColumn(
         modifier = Modifier
@@ -85,21 +131,6 @@ fun SettingsScreen(
                         IconButton(onClick = { viewModel.refreshDeviceConfig() }) {
                             Icon(Icons.Default.Refresh, contentDescription = stringResource(R.string.settings_refresh_config))
                         }
-                    }
-                }
-            }
-        }
-
-        // ===== Status message =====
-        item {
-            configStatus?.let { status ->
-                Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.tertiaryContainer)) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(status, modifier = Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                        TextButton(onClick = { viewModel.clearStatus() }) { Text(stringResource(R.string.settings_dismiss)) }
                     }
                 }
             }
@@ -243,9 +274,26 @@ fun SettingsScreen(
                 EnumDropdownSetting("GPS Mode", viewModel.gpsModes, positionState.gpsMode) { viewModel.setPositionGpsMode(it) }
                 Spacer(Modifier.height(8.dp))
                 SwitchSetting("GPS Enabled", positionState.gpsEnabled) { viewModel.setPositionGpsEnabled(it) }
+                if (positionState.gpsEnabled) {
+                    Spacer(Modifier.height(8.dp))
+                    GpsSourceSelector(
+                        selected = positionState.gpsSource,
+                        onSelectDevice = { viewModel.setPositionGpsSource(ConfigViewModel.GpsSource.DEVICE) },
+                        onSelectPhone = { withLocationPermission { viewModel.setPositionGpsSource(ConfigViewModel.GpsSource.PHONE) } },
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 SwitchSetting("Fixed Position", positionState.fixedPosition) { viewModel.setPositionFixed(it) }
                 if (positionState.fixedPosition) {
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { withLocationPermission { viewModel.applyFixedPositionFromPhone() } },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Icon(Icons.Default.MyLocation, contentDescription = null)
+                        Spacer(Modifier.width(8.dp))
+                        Text("Use phone GPS as fixed position")
+                    }
                     Spacer(Modifier.height(8.dp))
                     DoubleFieldSetting("Latitude (°)", positionState.fixedLatitude) { viewModel.setPositionFixedLatitude(it) }
                     Spacer(Modifier.height(8.dp))
@@ -261,6 +309,13 @@ fun SettingsScreen(
                         OutlinedButton(onClick = { viewModel.clearFixedPosition() }, modifier = Modifier.weight(1f)) {
                             Text("Clear")
                         }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedButton(
+                        onClick = { viewModel.broadcastPosition() },
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("Broadcast position now")
                     }
                 }
                 Spacer(Modifier.height(8.dp))
@@ -381,6 +436,69 @@ fun SettingsScreen(
                 }
             }
 
+            // ===== MQTT module =====
+            ExpandableConfigCard(title = stringResource(R.string.settings_mqtt), icon = Icons.Default.Cloud) {
+                SwitchSetting("Enabled", mqttState.enabled) { viewModel.setMqttEnabled(it) }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = mqttState.address,
+                    onValueChange = { viewModel.setMqttAddress(it) },
+                    label = { Text("Server address") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = mqttState.username,
+                    onValueChange = { viewModel.setMqttUsername(it) },
+                    label = { Text("Username") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                Spacer(Modifier.height(8.dp))
+                SecretFieldSetting("Password", mqttState.password) { viewModel.setMqttPassword(it) }
+                Spacer(Modifier.height(8.dp))
+                OutlinedTextField(
+                    value = mqttState.root,
+                    onValueChange = { viewModel.setMqttRoot(it) },
+                    label = { Text("Root topic") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                )
+                Spacer(Modifier.height(8.dp))
+                SwitchSetting("Encrypted packets", mqttState.encryptionEnabled) {
+                    viewModel.setMqttEncryptionEnabled(it)
+                }
+                SwitchSetting("JSON packets", mqttState.jsonEnabled) { viewModel.setMqttJsonEnabled(it) }
+                SwitchSetting("Use TLS", mqttState.tlsEnabled) { viewModel.setMqttTlsEnabled(it) }
+                SwitchSetting("Proxy through client", mqttState.proxyToClientEnabled) {
+                    viewModel.setMqttProxyToClientEnabled(it)
+                }
+                SwitchSetting("Report to public mesh map", mqttState.mapReportingEnabled) {
+                    viewModel.setMqttMapReportingEnabled(it)
+                }
+                if (mqttState.mapReportingEnabled) {
+                    Spacer(Modifier.height(8.dp))
+                    NumberFieldSetting(
+                        "Map publish interval (s)",
+                        mqttState.mapPublishIntervalSecs,
+                    ) { viewModel.setMqttMapPublishIntervalSecs(it) }
+                    Spacer(Modifier.height(8.dp))
+                    NumberFieldSetting(
+                        "Map position precision (bits)",
+                        mqttState.mapPositionPrecision,
+                    ) { viewModel.setMqttMapPositionPrecision(it) }
+                    SwitchSetting(
+                        "Opt-in: report location",
+                        mqttState.mapShouldReportLocation,
+                    ) { viewModel.setMqttMapShouldReportLocation(it) }
+                }
+                Spacer(Modifier.height(12.dp))
+                Button(onClick = { viewModel.applyMqttConfig() }, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.settings_apply_mqtt))
+                }
+            }
+
             // ===== Channels =====
             ExpandableConfigCard(title = stringResource(R.string.settings_channels), icon = Icons.Default.Forum) {
                 if (channelsState.isEmpty()) {
@@ -425,6 +543,13 @@ fun SettingsScreen(
                 }
                 Spacer(Modifier.height(8.dp))
                 OutlinedButton(
+                    onClick = { pendingAction = PendingDeviceAction.ResetNodeDb },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.settings_reset_nodedb))
+                }
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(
                     onClick = { pendingAction = PendingDeviceAction.FactoryReset },
                     modifier = Modifier.fillMaxWidth(),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = MaterialTheme.colorScheme.error)
@@ -432,6 +557,39 @@ fun SettingsScreen(
                     Text(stringResource(R.string.settings_factory_reset))
                 }
             }
+            }
+        }
+
+        // ===== Debug log =====
+        item {
+            ExpandableConfigCard(title = stringResource(R.string.settings_debug_log), icon = Icons.Default.BugReport) {
+                DebugLogContent(viewModel)
+            }
+        }
+
+        // ===== Firmware update (placeholder) =====
+        item {
+            ExpandableConfigCard(title = stringResource(R.string.settings_firmware_update), icon = Icons.Default.SystemUpdate) {
+                Text(
+                    text = "Installed: ${firmwareVersion ?: "—"}",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "OTA upload from this app is not yet implemented. " +
+                        "The transport (XModem-over-AdminMessage) is in the " +
+                        "Meshtastic protocol but the upload loop, CRC, retry, " +
+                        "and progress reporting are deliberately not wired " +
+                        "here to avoid bricking radios mid-transfer.",
+                    style = MaterialTheme.typography.bodySmall,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "For now, flash via the Meshtastic web flasher " +
+                        "(flasher.meshtastic.org) or `meshtastic --update`.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
 
@@ -523,6 +681,8 @@ fun SettingsScreen(
         val (titleRes, messageRes) = when (action) {
             PendingDeviceAction.Reboot ->
                 R.string.settings_reboot_confirm_title to R.string.settings_reboot_confirm_message
+            PendingDeviceAction.ResetNodeDb ->
+                R.string.settings_reset_nodedb_confirm_title to R.string.settings_reset_nodedb_confirm_message
             PendingDeviceAction.FactoryReset ->
                 R.string.settings_factory_reset_confirm_title to R.string.settings_factory_reset_confirm_message
         }
@@ -536,6 +696,7 @@ fun SettingsScreen(
                     onClick = {
                         when (action) {
                             PendingDeviceAction.Reboot -> viewModel.rebootDevice()
+                            PendingDeviceAction.ResetNodeDb -> viewModel.resetNodeDb()
                             PendingDeviceAction.FactoryReset -> viewModel.factoryReset()
                         }
                         pendingAction = null
@@ -620,6 +781,35 @@ private fun ExpandableConfigCard(
                     content()
                 }
             }
+        }
+    }
+}
+
+/**
+ * Two-way selector for the live GPS source while GPS is enabled: the node's
+ * own onboard GPS, or this phone's GPS broadcast to the mesh.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun GpsSourceSelector(
+    selected: ConfigViewModel.GpsSource,
+    onSelectDevice: () -> Unit,
+    onSelectPhone: () -> Unit,
+) {
+    Column(Modifier.fillMaxWidth()) {
+        Text("GPS Source", style = MaterialTheme.typography.bodyMedium)
+        Spacer(Modifier.height(4.dp))
+        SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+            SegmentedButton(
+                selected = selected == ConfigViewModel.GpsSource.DEVICE,
+                onClick = onSelectDevice,
+                shape = SegmentedButtonDefaults.itemShape(index = 0, count = 2),
+            ) { Text("Device GPS") }
+            SegmentedButton(
+                selected = selected == ConfigViewModel.GpsSource.PHONE,
+                onClick = onSelectPhone,
+                shape = SegmentedButtonDefaults.itemShape(index = 1, count = 2),
+            ) { Text("Phone GPS") }
         }
     }
 }
@@ -766,3 +956,65 @@ private fun EnumDropdownSetting(
     }
 }
 
+
+@Composable
+private fun DebugLogContent(viewModel: ConfigViewModel) {
+    val entries by viewModel.debugLog.collectAsState()
+    var sourceFilter by remember { mutableStateOf("all") }
+    val sources = remember(entries) {
+        listOf("all") + entries.map { it.source }.distinct().sorted()
+    }
+    val filtered = entries.filter { sourceFilter == "all" || it.source == sourceFilter }
+
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                "${filtered.size} of ${entries.size}",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            OutlinedButton(onClick = { viewModel.clearDebugLog() }) { Text("Clear") }
+        }
+        Spacer(Modifier.height(4.dp))
+        EnumDropdownSetting("Source", sources, sourceFilter) { sourceFilter = it }
+        Spacer(Modifier.height(8.dp))
+        if (filtered.isEmpty()) {
+            Text(
+                "No events yet.",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        } else {
+            val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+            // Cap rendered rows to keep recomposition cheap; oldest of
+            // the matched entries are dropped first.
+            val visible = filtered.takeLast(150)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 320.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                visible.forEach { e ->
+                    val color = when (e.level) {
+                        re.chasam.voicetastic.service.DebugLevel.Info -> MaterialTheme.colorScheme.onSurface
+                        re.chasam.voicetastic.service.DebugLevel.Warn -> MaterialTheme.colorScheme.tertiary
+                        re.chasam.voicetastic.service.DebugLevel.Error -> MaterialTheme.colorScheme.error
+                    }
+                    val icon = when (e.level) {
+                        re.chasam.voicetastic.service.DebugLevel.Info -> "·"
+                        re.chasam.voicetastic.service.DebugLevel.Warn -> "⚠"
+                        re.chasam.voicetastic.service.DebugLevel.Error -> "✗"
+                    }
+                    Text(
+                        text = "${timeFormat.format(Date(e.at))} $icon [${e.source}] ${e.message}",
+                        color = color,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                    )
+                }
+            }
+        }
+    }
+}

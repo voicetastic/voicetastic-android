@@ -20,6 +20,9 @@ message User {
   bytes macaddr = 4;
   HardwareModel hw_model = 5;
   bool is_licensed = 6;
+  // Node's role in the mesh (CLIENT, ROUTER, ...). Field tag 7 matches real
+  // firmware; the enum is defined in Config.DeviceConfig below.
+  Config.DeviceConfig.Role role = 7;
 }
 
 enum HardwareModel {
@@ -444,9 +447,17 @@ message ModuleConfig {
     bool encryption_enabled = 5;
     bool json_enabled = 6;
     bool tls_enabled = 7;
-    string root_topic = 8;
+    // Real firmware names field 8 "root" (the MQTT root topic, default "msh").
+    string root = 8;
     bool proxy_to_client_enabled = 9;
     bool map_reporting_enabled = 10;
+    MapReportSettings map_report_settings = 11;
+  }
+
+  message MapReportSettings {
+    uint32 publish_interval_secs = 1;
+    uint32 position_precision = 2;
+    bool should_report_location = 3;
   }
 
   message SerialConfig {
@@ -669,8 +680,11 @@ message AdminMessage {
 
     // Manually-fixed position: send a Position to be stored by firmware as
     // the device's static location. `remove_fixed_position` clears it.
-    Position set_fixed_position = 36;
-    bool remove_fixed_position = 37;
+    // Real firmware tags are 41/42 (36/37 are the canned-message / ringtone
+    // string commands upstream — sending a Position there makes the node fail
+    // to decode it as a UTF-8 string).
+    Position set_fixed_position = 41;
+    bool remove_fixed_position = 42;
 
     // Actions (real firmware tags)
     int32 reboot_ota_seconds = 95;

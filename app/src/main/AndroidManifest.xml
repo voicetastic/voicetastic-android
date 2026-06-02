@@ -4,14 +4,16 @@
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!--
-      Location is required by the platform for BLE scanning on Android 11
-      and below. On Android 12+ we declare BLUETOOTH_SCAN with the
-      `neverForLocation` flag, which signals to the OS that we do not
-      derive location from BLE results — so location permission is not
-      needed there and is scoped out via maxSdkVersion.
+      Location serves two purposes here:
+        1. The platform requires it for BLE scanning on Android 11 and below
+           (on 12+ we use BLUETOOTH_SCAN with `neverForLocation`, so BLE
+           itself does not need location there).
+        2. The Position settings let the phone act as the node's GPS source
+           ("Use phone GPS"), which reads the device's own location.
+      Because of (2) we request it on all API levels (no maxSdkVersion cap).
     -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"
-        android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
@@ -19,6 +21,14 @@
         tools:targetApi="s" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"
         tools:targetApi="s" />
+
+    <!-- osmdroid needs the network for tile downloads on the Map
+         screen. The rest of the app stays offline-capable; these
+         permissions are unused unless the user opens the Map tab. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
 
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
     <!-- USB host (used to talk to a Meshtastic node over a USB serial cable). -->

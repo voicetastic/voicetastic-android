@@ -8,22 +8,14 @@ Voicetastic talks to a Meshtastic node over BLE, splices AMR-NB voice into
 small packets that fit a LoRa frame, and lets you reach anyone on the mesh
 without an internet connection.
 
-> ⚠️ **Voice messaging is experimental and has not been field-tested yet.**
-> The chunking, reassembly and playback paths are implemented end-to-end
-> per [`VOICE_PROTOCOL.md`](./VOICE_PROTOCOL.md), but they have not been
-> validated over real LoRa hardware between two devices. Expect edge
-> cases (timing, lost-chunk recovery, partial playback) to need tuning.
-> Text messaging and the configuration UI are the supported paths today.
-
 ---
 
 ## ✨ What you get
 
-* **🔊 Voice messages over LoRa** *(⚠️ experimental — not yet tested on
-  real hardware)* — record, broadcast or DM, receive, play. Audio is
-  encoded with AMR-NB (8 selectable bitrates), chunked, and reassembled
-  on the other side. Lost chunks become silence frames so the audio
-  timeline stays in sync.
+* **🔊 Voice messages over LoRa** — record, broadcast or DM, receive,
+  play. Audio is encoded with AMR-NB (8 selectable bitrates), chunked,
+  and reassembled on the other side. Lost chunks become silence frames
+  so the audio timeline stays in sync.
 * **💬 Text chat** — standard Meshtastic text messaging on the channel and
   destination of your choice.
 * **🛰️ Live mesh roster** — see every node your radio knows about: long
@@ -86,10 +78,6 @@ cd voicetastic
 3. Type your message → ➤.
 
 ### Send a voice message
-
-> ⚠️ The voice path is **not yet validated end-to-end on physical
-> radios**. The steps below describe the intended flow; expect rough
-> edges and please file an issue if you try it.
 
 1. From the **Chat** tab, tap and **hold** the mic button to record
    (release or wait for the configured max-duration cap to send).

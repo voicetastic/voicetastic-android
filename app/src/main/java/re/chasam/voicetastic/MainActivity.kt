@@ -41,6 +41,7 @@ import re.chasam.voicetastic.model.VoiceConfig
 import re.chasam.voicetastic.model.VoiceConfigStore
 import re.chasam.voicetastic.navigation.AppNavigation
 import re.chasam.voicetastic.service.MeshServiceManager
+import re.chasam.voicetastic.service.PhoneLocationProvider
 import re.chasam.voicetastic.ui.chat.MessagingViewModel
 import re.chasam.voicetastic.ui.settings.ConfigViewModel
 import re.chasam.voicetastic.ui.theme.AppTheme
@@ -169,7 +170,11 @@ class MainActivity : ComponentActivity() {
         }
 
         messagingViewModel = MessagingViewModel(meshServiceManager, this, voiceConfig)
-        configViewModel = ConfigViewModel(meshServiceManager, voiceConfig)
+        configViewModel = ConfigViewModel(
+            meshServiceManager,
+            voiceConfig,
+            PhoneLocationProvider(applicationContext)
+        )
 
         registerUsbReceiver()
         // NOTE: we deliberately do NOT auto-connect on the launching intent

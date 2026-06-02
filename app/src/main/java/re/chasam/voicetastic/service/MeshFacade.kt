@@ -70,6 +70,13 @@ interface MeshFacade {
     val networkConfig: StateFlow<MeshProtos.Config.NetworkConfig?>
     val displayConfig: StateFlow<MeshProtos.Config.DisplayConfig?>
     val bluetoothConfig: StateFlow<MeshProtos.Config.BluetoothConfig?>
+    /**
+     * MQTT module-config snapshot, when the firmware has reported one
+     * during the want-config burst. Currently the only module-config
+     * variant the Kotlin side surfaces; other variants (Telemetry,
+     * Serial, RangeTest, …) are silently dropped by the bridge.
+     */
+    val mqttConfig: StateFlow<MeshProtos.ModuleConfig.MQTTConfig?>
     val channels: StateFlow<List<MeshProtos.Channel>>
     val owner: StateFlow<MeshProtos.User?>
     val moduleConfigs: StateFlow<Map<String, MeshProtos.ModuleConfig>>
@@ -78,6 +85,36 @@ interface MeshFacade {
     // ----- Outbound traffic -----
 
     fun sendText(text: String, destination: String? = null, channel: Int = 0): Boolean
+
+    /**
+     * Like [sendText] but returns the firmware's mesh packet id on success
+     * (or null on failure). Callers that want to correlate the outgoing
+     * message with the eventual delivery ack/nak should use this and pair
+     * the id with the per-packet event from [ackEvents].
+     */
+    fun sendTextTracked(text: String, destination: String? = null, channel: Int = 0): UInt?
+
+    /**
+     * Per-packet ack/nak events from the firmware. Emits once per outgoing
+     * packet for which the firmware reports a routing outcome. The packet
+     * id matches the one returned by [sendTextTracked].
+     */
+    val ackEvents: kotlinx.coroutines.flow.SharedFlow<MeshAckEvent>
+
+    /**
+     * In-app structured event log surfaced on the Debug settings card.
+     * Bounded ring buffer (~500 entries) maintained by the service;
+     * UI subscribers can render and filter without polling.
+     */
+    val debugLog: StateFlow<List<DebugEntry>>
+
+    /**
+     * Per-node telemetry history (battery + SNR samples), keyed by
+     * node_num. Bounded ring buffer per node. Driven from each
+     * inbound NodeInfo update by [MeshServiceManager]; UI surfaces it
+     * as sparklines on the node-detail dialog.
+     */
+    val nodeHistory: StateFlow<Map<Int, List<NodeSample>>>
     fun sendData(
         data: ByteArray,
         portNum: Int,
@@ -100,8 +137,21 @@ interface MeshFacade {
     fun writeOwner(user: MeshProtos.User): Boolean
     fun setFixedPosition(position: MeshProtos.Position): Boolean
     fun removeFixedPosition(): Boolean
+
+    /**
+     * Broadcast a [Position] as a one-shot mesh packet (POSITION_APP).
+     * `dest == null` broadcasts; otherwise the packet is addressed to
+     * that node num. Distinct from [setFixedPosition], which writes a
+     * config admin message to the local radio (no mesh packet emitted).
+     */
+    fun broadcastPosition(
+        position: MeshProtos.Position,
+        channel: Int = 0,
+        dest: String? = null,
+    ): Boolean
     fun rebootDevice(seconds: Int = 5): Boolean
     fun factoryReset(): Boolean
+    fun resetNodeDb(): Boolean
 
     // ----- Lifecycle -----
 

@@ -52,3 +52,68 @@ data class IncomingData(
         return result
     }
 }
+
+/**
+ * Coarse delivery outcome for an outgoing text/data packet. Mirrors the
+ * Rust bridge's `AckResultKind` (which in turn flattens core's
+ * `AckResult`). UI surfaces this on outgoing chat bubbles as the
+ * ⏳/✓/❌/⏱ icon.
+ */
+enum class DeliveryStatus {
+    /** No ack/nak yet; default for freshly-sent messages. */
+    Pending,
+
+    /** Firmware reported a successful delivery routing ack. */
+    Delivered,
+
+    /** Firmware reported a NAK or other routing failure. */
+    Failed,
+
+    /** No ack within the firmware's retry window. */
+    TimedOut,
+
+    /** Service shut down before the ack arrived (e.g. disconnect). */
+    Cancelled,
+}
+
+/**
+ * One per-packet ack/nak event surfaced from [MeshFacade.ackEvents].
+ * `packetId` matches the value returned by
+ * [MeshFacade.sendTextTracked] / [MeshFacade.sendData].
+ */
+data class MeshAckEvent(val packetId: UInt, val status: DeliveryStatus)
+
+/**
+ * Severity tier used by the Debug log surface. Mirrors the desktop
+ * GUI's `DebugLevel` enum so a future structured-log channel through
+ * the bridge would map straight across.
+ */
+enum class DebugLevel { Info, Warn, Error }
+
+/**
+ * One in-app event surfaced in the Debug log panel. `source` groups
+ * entries by subsystem ("transport", "protocol", "voice", "mesh",
+ * "settings") so the panel can filter; `message` is a short
+ * human-readable summary.
+ */
+data class DebugEntry(
+    val at: Long = System.currentTimeMillis(),
+    val level: DebugLevel = DebugLevel.Info,
+    val source: String = "",
+    val message: String = "",
+)
+
+/**
+ * One telemetry sample of a peer's latest reported metrics. Stored
+ * in [MeshFacade.nodeHistory] keyed by node_num; the node-detail
+ * dialog renders these as sparklines so the user can see battery
+ * + signal trends without leaving the chat tab.
+ *
+ * `battery` is null when the firmware didn't include `device_metrics`
+ * on that NodeInfo update; `snr` is always present (may be 0).
+ */
+data class NodeSample(
+    val at: Long,
+    val battery: Int?,
+    val snr: Float,
+)

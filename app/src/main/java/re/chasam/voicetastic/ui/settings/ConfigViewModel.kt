@@ -3,6 +3,7 @@ package re.chasam.voicetastic.ui.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.geeksville.mesh.MeshProtos
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -11,6 +12,7 @@ import re.chasam.voicetastic.model.Codec2Mode
 import re.chasam.voicetastic.model.VoiceCodecChoice
 import re.chasam.voicetastic.model.VoiceConfig
 import re.chasam.voicetastic.service.MeshFacade
+import re.chasam.voicetastic.service.PhoneLocationProvider
 
 /**
  * ViewModel for the settings/configuration screen.
@@ -19,7 +21,8 @@ import re.chasam.voicetastic.service.MeshFacade
  */
 class ConfigViewModel(
     private val meshService: MeshFacade,
-    private val voiceConfig: MutableStateFlow<VoiceConfig>
+    private val voiceConfig: MutableStateFlow<VoiceConfig>,
+    private val phoneLocation: PhoneLocationProvider? = null
 ) : ViewModel() {
 
     val connectionState: StateFlow<String> = meshService.connectionState
@@ -91,11 +94,21 @@ class ConfigViewModel(
 
     // ========================  POSITION  ========================
 
+    /**
+     * Where the node's live position comes from while GPS is enabled:
+     *  - [DEVICE] the node's own onboard GPS (normal Meshtastic behaviour)
+     *  - [PHONE]  this smartphone's GPS, broadcast to the mesh by the app, so
+     *             a GPS-less node still reports a position.
+     * App-side only; not part of the device's PositionConfig proto.
+     */
+    enum class GpsSource { DEVICE, PHONE }
+
     data class PositionUiState(
         val positionBroadcastSecs: Int = 0,
         val positionBroadcastSmartEnabled: Boolean = false,
         val fixedPosition: Boolean = false,
         val gpsEnabled: Boolean = true,
+        val gpsSource: GpsSource = GpsSource.DEVICE,
         val gpsUpdateInterval: Int = 0,
         val gpsMode: String = "ENABLED",
         val broadcastSmartMinimumDistance: Int = 0,
@@ -182,6 +195,27 @@ class ConfigViewModel(
 
     val pairingModes: List<String> = enumNames(MeshProtos.Config.BluetoothConfig.PairingMode.values())
 
+    // ========================  MQTT MODULE  ========================
+
+    data class MqttUiState(
+        val enabled: Boolean = false,
+        val address: String = "",
+        val username: String = "",
+        val password: String = "",
+        val root: String = "",
+        val encryptionEnabled: Boolean = true,
+        val jsonEnabled: Boolean = false,
+        val tlsEnabled: Boolean = false,
+        val proxyToClientEnabled: Boolean = false,
+        val mapReportingEnabled: Boolean = false,
+        val mapPublishIntervalSecs: Int = 0,
+        val mapPositionPrecision: Int = 0,
+        val mapShouldReportLocation: Boolean = false,
+    )
+
+    private val _mqttState = MutableStateFlow(MqttUiState())
+    val mqttState: StateFlow<MqttUiState> = _mqttState.asStateFlow()
+
     // ========================  CHANNELS  ========================
 
     data class ChannelUiState(
@@ -259,6 +293,9 @@ class ConfigViewModel(
             meshService.bluetoothConfig.collect { bt -> if (bt != null && !isDirty("bluetooth")) updateBluetoothFromProto(bt) }
         }
         viewModelScope.launch {
+            meshService.mqttConfig.collect { m -> if (m != null && !isDirty("mqtt")) updateMqttFromProto(m) }
+        }
+        viewModelScope.launch {
             meshService.owner.collect { user ->
                 if (user != null && !isDirty("owner")) {
                     _ownerState.value = OwnerUiState(
@@ -301,6 +338,7 @@ class ConfigViewModel(
         meshService.networkConfig.value?.let { if (!isDirty("network")) updateNetworkFromProto(it) }
         meshService.displayConfig.value?.let { if (!isDirty("display")) updateDisplayFromProto(it) }
         meshService.bluetoothConfig.value?.let { if (!isDirty("bluetooth")) updateBluetoothFromProto(it) }
+        meshService.mqttConfig.value?.let { if (!isDirty("mqtt")) updateMqttFromProto(it) }
         meshService.owner.value?.let { user ->
             if (!isDirty("owner")) {
                 _ownerState.value = OwnerUiState(
@@ -431,6 +469,25 @@ class ConfigViewModel(
         )
     }
 
+    private fun updateMqttFromProto(m: MeshProtos.ModuleConfig.MQTTConfig) {
+        val map = if (m.hasMapReportSettings()) m.mapReportSettings else null
+        _mqttState.value = MqttUiState(
+            enabled = m.enabled,
+            address = m.address,
+            username = m.username,
+            password = m.password,
+            root = m.root,
+            encryptionEnabled = m.encryptionEnabled,
+            jsonEnabled = m.jsonEnabled,
+            tlsEnabled = m.tlsEnabled,
+            proxyToClientEnabled = m.proxyToClientEnabled,
+            mapReportingEnabled = m.mapReportingEnabled,
+            mapPublishIntervalSecs = map?.publishIntervalSecs ?: 0,
+            mapPositionPrecision = map?.positionPrecision ?: 0,
+            mapShouldReportLocation = map?.shouldReportLocation ?: false,
+        )
+    }
+
     // ========================  SETTERS  ========================
     // Each setter marks its section dirty so subsequent device pushes don't
     // overwrite the user's in-progress edits.
@@ -473,7 +530,28 @@ class ConfigViewModel(
     fun setPositionBroadcastSecs(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(positionBroadcastSecs = v) }
     fun setPositionSmartEnabled(v: Boolean) { markDirty("position"); _positionState.value = _positionState.value.copy(positionBroadcastSmartEnabled = v) }
     fun setPositionFixed(v: Boolean) { markDirty("position"); _positionState.value = _positionState.value.copy(fixedPosition = v) }
-    fun setPositionGpsEnabled(v: Boolean) { markDirty("position"); _positionState.value = _positionState.value.copy(gpsEnabled = v) }
+    fun setPositionGpsEnabled(v: Boolean) {
+        markDirty("position")
+        _positionState.value = _positionState.value.copy(gpsEnabled = v)
+        // Disabling GPS entirely also stops the phone acting as the source.
+        if (!v) stopPhoneGpsTracking()
+        else if (_positionState.value.gpsSource == GpsSource.PHONE) startPhoneGpsTracking()
+    }
+
+    /**
+     * Choose whether the node's live position comes from its own GPS or this
+     * phone's GPS. Selecting [GpsSource.PHONE] starts streaming the phone's
+     * location to the mesh; [GpsSource.DEVICE] stops it. The caller (UI) must
+     * have obtained ACCESS_FINE_LOCATION before selecting PHONE.
+     */
+    fun setPositionGpsSource(source: GpsSource) {
+        _positionState.value = _positionState.value.copy(gpsSource = source)
+        if (source == GpsSource.PHONE && _positionState.value.gpsEnabled) {
+            startPhoneGpsTracking()
+        } else {
+            stopPhoneGpsTracking()
+        }
+    }
     fun setPositionGpsUpdateInterval(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(gpsUpdateInterval = v) }
     fun setPositionGpsMode(mode: String) { markDirty("position"); _positionState.value = _positionState.value.copy(gpsMode = mode) }
     fun setPositionSmartMinDistance(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(broadcastSmartMinimumDistance = v) }
@@ -517,6 +595,21 @@ class ConfigViewModel(
     fun setBluetoothEnabled(v: Boolean) { markDirty("bluetooth"); _bluetoothState.value = _bluetoothState.value.copy(enabled = v) }
     fun setBluetoothMode(mode: String) { markDirty("bluetooth"); _bluetoothState.value = _bluetoothState.value.copy(mode = mode) }
     fun setBluetoothFixedPin(v: Int) { markDirty("bluetooth"); _bluetoothState.value = _bluetoothState.value.copy(fixedPin = v) }
+
+    // --- MQTT module ---
+    fun setMqttEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(enabled = v) }
+    fun setMqttAddress(v: String) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(address = v) }
+    fun setMqttUsername(v: String) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(username = v) }
+    fun setMqttPassword(v: String) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(password = v) }
+    fun setMqttRoot(v: String) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(root = v) }
+    fun setMqttEncryptionEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(encryptionEnabled = v) }
+    fun setMqttJsonEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(jsonEnabled = v) }
+    fun setMqttTlsEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(tlsEnabled = v) }
+    fun setMqttProxyToClientEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(proxyToClientEnabled = v) }
+    fun setMqttMapReportingEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(mapReportingEnabled = v) }
+    fun setMqttMapPublishIntervalSecs(v: Int) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(mapPublishIntervalSecs = v) }
+    fun setMqttMapPositionPrecision(v: Int) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(mapPositionPrecision = v) }
+    fun setMqttMapShouldReportLocation(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(mapShouldReportLocation = v) }
 
     // --- Channel ---
     fun setChannelName(index: Int, name: String) {
@@ -714,11 +807,125 @@ class ConfigViewModel(
         _configStatus.value = if (ok) "Fixed position sent" else "Failed to send fixed position"
     }
 
+    /**
+     * Use the phone's own GPS as the node's position source: read a single
+     * fix from the smartphone, reflect it in the fixed-position fields, and
+     * push it to the device via `set_fixed_position`. This lets a GPS-less
+     * node report the phone's location.
+     *
+     * The caller (UI) must ensure ACCESS_FINE_LOCATION has been granted before
+     * invoking this; a missing grant or disabled location service surfaces as
+     * a "could not get phone location" status.
+     */
+    fun applyFixedPositionFromPhone() {
+        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        val provider = phoneLocation ?: run {
+            _configStatus.value = "Phone GPS unavailable"; return
+        }
+        _configStatus.value = "Getting phone location…"
+        viewModelScope.launch {
+            val fix = provider.currentFix()
+            if (fix == null) {
+                _configStatus.value =
+                    "Could not get phone location (enable location services / grant permission)"
+                return@launch
+            }
+            val altitude = if (fix.hasAltitude()) fix.altitude.toInt() else 0
+            // Reflect the phone fix in the UI and turn on fixed-position so a
+            // subsequent "Apply Position Config" keeps the device using it.
+            markDirty("position")
+            _positionState.value = _positionState.value.copy(
+                fixedPosition = true,
+                fixedLatitude = fix.latitude,
+                fixedLongitude = fix.longitude,
+                fixedAltitude = altitude
+            )
+            val pos = MeshProtos.Position.newBuilder()
+                .setLatitudeI((fix.latitude * 1e7).toInt())
+                .setLongitudeI((fix.longitude * 1e7).toInt())
+                .setAltitude(altitude)
+                .build()
+            val ok = meshService.setFixedPosition(pos)
+            _configStatus.value = if (ok) {
+                "Fixed position set from phone GPS"
+            } else {
+                "Failed to send phone position"
+            }
+        }
+    }
+
+    /** UI feedback when the user declines the location permission prompt. */
+    fun onPhoneGpsPermissionDenied() {
+        // Selecting "Phone GPS" never took effect, so make sure the source
+        // shows as Device and tracking is stopped.
+        _positionState.value = _positionState.value.copy(gpsSource = GpsSource.DEVICE)
+        stopPhoneGpsTracking()
+        _configStatus.value = "Location permission denied — can't use phone GPS"
+    }
+
+    /** Active phone-GPS streaming job, non-null while PHONE source is on. */
+    private var phoneGpsJob: Job? = null
+
+    /**
+     * Stream this phone's location to the mesh as Position packets, so the
+     * node reports the phone's location as its own. Cadence follows the
+     * configured broadcast interval (default 30 s).
+     */
+    private fun startPhoneGpsTracking() {
+        val provider = phoneLocation ?: run {
+            _configStatus.value = "Phone GPS unavailable"; return
+        }
+        if (phoneGpsJob?.isActive == true) return
+        val secs = _positionState.value.positionBroadcastSecs.takeIf { it > 0 } ?: 30
+        val intervalMs = secs.toLong() * 1000L
+        _configStatus.value = "Phone GPS active — broadcasting this phone's location"
+        phoneGpsJob = viewModelScope.launch {
+            provider.locationUpdates(intervalMs).collect { loc ->
+                if (!meshService.isConnected) return@collect
+                val altitude = if (loc.hasAltitude()) loc.altitude.toInt() else 0
+                val pos = MeshProtos.Position.newBuilder()
+                    .setLatitudeI((loc.latitude * 1e7).toInt())
+                    .setLongitudeI((loc.longitude * 1e7).toInt())
+                    .setAltitude(altitude)
+                    .build()
+                meshService.broadcastPosition(pos, channel = 0, dest = null)
+            }
+        }
+    }
+
+    private fun stopPhoneGpsTracking() {
+        phoneGpsJob?.cancel()
+        phoneGpsJob = null
+    }
+
+    override fun onCleared() {
+        super.onCleared()
+        stopPhoneGpsTracking()
+    }
+
     /** Tell the device to forget any previously-set fixed position. */
     fun clearFixedPosition() {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
         val ok = meshService.removeFixedPosition()
         _configStatus.value = if (ok) "Fixed position cleared" else "Failed to clear fixed position"
+    }
+
+    /**
+     * Broadcast the user-entered lat/lon/altitude as a one-shot Position
+     * packet on the mesh (POSITION_APP). Distinct from
+     * [applyFixedPosition] which writes a config admin message to the
+     * local radio without emitting a mesh packet.
+     */
+    fun broadcastPosition() {
+        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        val s = _positionState.value
+        val pos = MeshProtos.Position.newBuilder()
+            .setLatitudeI((s.fixedLatitude * 1e7).toInt())
+            .setLongitudeI((s.fixedLongitude * 1e7).toInt())
+            .setAltitude(s.fixedAltitude)
+            .build()
+        val ok = meshService.broadcastPosition(pos, channel = 0, dest = null)
+        _configStatus.value = if (ok) "Position broadcast sent" else "Failed to broadcast position"
     }
 
     fun applyPowerConfig() {
@@ -805,6 +1012,36 @@ class ConfigViewModel(
         _configStatus.value = if (ok) "Bluetooth config sent" else "Failed to send bluetooth config"
     }
 
+    fun applyMqttConfig() {
+        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (meshService.mqttConfig.value == null) {
+            _configStatus.value = "MQTT config not yet loaded — refresh first"; return
+        }
+        val s = _mqttState.value
+        val mqttBuilder = MeshProtos.ModuleConfig.MQTTConfig.newBuilder()
+            .setEnabled(s.enabled)
+            .setAddress(s.address)
+            .setUsername(s.username)
+            .setPassword(s.password)
+            .setRoot(s.root)
+            .setEncryptionEnabled(s.encryptionEnabled)
+            .setJsonEnabled(s.jsonEnabled)
+            .setTlsEnabled(s.tlsEnabled)
+            .setProxyToClientEnabled(s.proxyToClientEnabled)
+            .setMapReportingEnabled(s.mapReportingEnabled)
+        if (s.mapReportingEnabled) {
+            mqttBuilder.mapReportSettings = MeshProtos.ModuleConfig.MapReportSettings.newBuilder()
+                .setPublishIntervalSecs(s.mapPublishIntervalSecs)
+                .setPositionPrecision(s.mapPositionPrecision)
+                .setShouldReportLocation(s.mapShouldReportLocation)
+                .build()
+        }
+        val mc = MeshProtos.ModuleConfig.newBuilder().setMqtt(mqttBuilder).build()
+        val ok = meshService.writeModuleConfig(mc)
+        if (ok) dirty.remove("mqtt")
+        _configStatus.value = if (ok) "MQTT module config sent" else "Failed to send MQTT module config"
+    }
+
     fun applyChannel(index: Int) {
         if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
         if (meshService.channels.value.isEmpty()) {
@@ -884,7 +1121,26 @@ class ConfigViewModel(
         _configStatus.value = "Factory reset command sent"
     }
 
+    fun resetNodeDb() {
+        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.resetNodeDb()) {
+            _configStatus.value = "Reset NodeDB failed to send"
+            return
+        }
+        // `resetNodeDb()` now wraps reset-plus-refresh in the bridge, so
+        // we don't need a separate `refreshConfig()` call here.
+        _configStatus.value = "Reset NodeDB sent — refreshing…"
+    }
+
     fun clearStatus() { _configStatus.value = null }
+
+    /** Live in-app event log, surfaced on the Debug settings card. */
+    val debugLog: StateFlow<List<re.chasam.voicetastic.service.DebugEntry>> =
+        meshService.debugLog
+
+    fun clearDebugLog() {
+        (meshService as? re.chasam.voicetastic.service.MeshServiceManager)?.clearDebugLog()
+    }
 
     // ========================  UTILITIES  ========================
 
