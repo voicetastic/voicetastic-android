@@ -114,5 +114,6 @@
     <!-- Navigation -->
     <string name="nav_devices">Devices</string>
     <string name="nav_chat">Chat</string>
+    <string name="nav_map">Map</string>
     <string name="nav_settings">Settings</string>
 </resources>

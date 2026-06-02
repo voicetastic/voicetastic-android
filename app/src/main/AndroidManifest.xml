@@ -20,6 +20,12 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT"
         tools:targetApi="s" />
 
+    <!-- osmdroid needs the network for tile downloads on the Map
+         screen. The rest of the app stays offline-capable; this
+         permission is unused unless the user opens the Map tab. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
     <!-- USB host (used to talk to a Meshtastic node over a USB serial cable). -->
     <uses-feature android:name="android.hardware.usb.host" android:required="false" />

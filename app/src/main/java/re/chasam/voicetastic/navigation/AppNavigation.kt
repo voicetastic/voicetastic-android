@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.filled.Devices
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -21,12 +22,14 @@ import re.chasam.voicetastic.service.MeshServiceManager
 import re.chasam.voicetastic.ui.chat.ChatScreen
 import re.chasam.voicetastic.ui.chat.MessagingViewModel
 import re.chasam.voicetastic.ui.device.DeviceScreen
+import re.chasam.voicetastic.ui.map.MapScreen
 import re.chasam.voicetastic.ui.settings.ConfigViewModel
 import re.chasam.voicetastic.ui.settings.SettingsScreen
 
 enum class Screen(val route: String, val titleResId: Int, val icon: ImageVector) {
     Devices("devices", R.string.nav_devices, Icons.Default.Devices),
     Chat("chat", R.string.nav_chat, Icons.AutoMirrored.Filled.Chat),
+    Map("map", R.string.nav_map, Icons.Default.Map),
     Settings("settings", R.string.nav_settings, Icons.Default.Settings)
 }
 
@@ -88,6 +91,9 @@ fun AppNavigation(
             }
             composable(Screen.Chat.route) {
                 ChatScreen(viewModel = messagingViewModel)
+            }
+            composable(Screen.Map.route) {
+                MapScreen(messagingViewModel = messagingViewModel)
             }
             composable(Screen.Settings.route) {
                 SettingsScreen(
