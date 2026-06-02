@@ -30,6 +30,13 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
          * leaking memory.
          */
         private const val DEBUG_LOG_CAP = 500
+        /**
+         * Cap on retained per-node telemetry samples before FIFO
+         * eviction. 60 samples covers ~30 min of NodeInfo updates at
+         * a typical broadcast cadence; enough for a sparkline trend
+         * without leaking memory.
+         */
+        private const val NODE_HISTORY_CAP = 60
     }
     // IncomingText / IncomingData / TransportType moved to MeshTypes.kt
     // so the [MeshFacade] interface can reference them without
@@ -67,6 +74,21 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
     private val _debugLog = MutableStateFlow<List<DebugEntry>>(emptyList())
     override val debugLog: StateFlow<List<DebugEntry>> = _debugLog.asStateFlow()
+
+    private val _nodeHistory = MutableStateFlow<Map<Int, List<NodeSample>>>(emptyMap())
+    override val nodeHistory: StateFlow<Map<Int, List<NodeSample>>> = _nodeHistory.asStateFlow()
+
+    private fun pushNodeSample(nodeNum: Int, battery: Int?, snr: Float) {
+        val current = _nodeHistory.value
+        val buf = current[nodeNum].orEmpty()
+        val last = buf.lastOrNull()
+        // Skip when neither metric moved since the last sample — keeps
+        // the ring buffer trend-shaped instead of repeating values.
+        if (last != null && last.battery == battery && kotlin.math.abs(last.snr - snr) < 0.01f) return
+        val next = (buf + NodeSample(System.currentTimeMillis(), battery, snr))
+            .takeLast(NODE_HISTORY_CAP)
+        _nodeHistory.value = current + (nodeNum to next)
+    }
 
     /**
      * Append a [DebugEntry] to the in-app log, evicting FIFO past
@@ -451,6 +473,14 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                         if (!configBurstInProgress) {
                             _nodes.value = nodeMap.values.toList()
                         }
+                        // Append a telemetry sample (battery + SNR) so
+                        // the node-detail dialog can render trend
+                        // sparklines.
+                        pushNodeSample(
+                            nodeNum = ni.num,
+                            battery = metrics?.batteryLevel?.toInt(),
+                            snr = ni.snr,
+                        )
                         val my = myNodeNum
                         if (my != null && ni.num == my && ni.hasUser()) _owner.value = ni.user
                         if (my != null && ni.num == my && ni.hasPosition()) _myPosition.value = ni.position

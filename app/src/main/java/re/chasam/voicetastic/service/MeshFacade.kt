@@ -107,6 +107,14 @@ interface MeshFacade {
      * UI subscribers can render and filter without polling.
      */
     val debugLog: StateFlow<List<DebugEntry>>
+
+    /**
+     * Per-node telemetry history (battery + SNR samples), keyed by
+     * node_num. Bounded ring buffer per node. Driven from each
+     * inbound NodeInfo update by [MeshServiceManager]; UI surfaces it
+     * as sparklines on the node-detail dialog.
+     */
+    val nodeHistory: StateFlow<Map<Int, List<NodeSample>>>
     fun sendData(
         data: ByteArray,
         portNum: Int,

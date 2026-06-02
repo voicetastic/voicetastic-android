@@ -102,3 +102,18 @@ data class DebugEntry(
     val source: String = "",
     val message: String = "",
 )
+
+/**
+ * One telemetry sample of a peer's latest reported metrics. Stored
+ * in [MeshFacade.nodeHistory] keyed by node_num; the node-detail
+ * dialog renders these as sparklines so the user can see battery
+ * + signal trends without leaving the chat tab.
+ *
+ * `battery` is null when the firmware didn't include `device_metrics`
+ * on that NodeInfo update; `snr` is always present (may be 0).
+ */
+data class NodeSample(
+    val at: Long,
+    val battery: Int?,
+    val snr: Float,
+)

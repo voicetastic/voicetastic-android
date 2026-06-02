@@ -32,6 +32,7 @@ import java.util.*
 fun ChatScreen(viewModel: MessagingViewModel) {
     val chatItems by viewModel.chatItems.collectAsState()
     val nodes by viewModel.nodes.collectAsState()
+    val nodeHistory by viewModel.nodeHistory.collectAsState()
     val selectedNode by viewModel.selectedNode.collectAsState()
     val selectedChannel by viewModel.selectedChannel.collectAsState()
     val availableChannels by viewModel.availableChannels.collectAsState()
@@ -285,6 +286,7 @@ fun ChatScreen(viewModel: MessagingViewModel) {
         NodePickerDialog(
             nodes = nodes,
             selectedNode = selectedNode,
+            nodeHistory = nodeHistory,
             onNodeSelected = { node ->
                 viewModel.selectNode(node)
                 showNodePicker = false
@@ -436,6 +438,7 @@ private fun VoiceMessageBubble(
 private fun NodePickerDialog(
     nodes: List<MeshNode>,
     selectedNode: MeshNode?,
+    nodeHistory: Map<Int, List<re.chasam.voicetastic.service.NodeSample>>,
     onNodeSelected: (MeshNode?) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -488,12 +491,19 @@ private fun NodePickerDialog(
         }
     )
     detailNode?.let { node ->
-        NodeDetailDialog(node = node, onDismiss = { detailNode = null })
+        val samples = re.chasam.voicetastic.core.NodeIds.nodeIdToNum(node.nodeId)
+            ?.let { nodeHistory[it] }
+            ?: emptyList()
+        NodeDetailDialog(node = node, samples = samples, onDismiss = { detailNode = null })
     }
 }
 
 @Composable
-private fun NodeDetailDialog(node: MeshNode, onDismiss: () -> Unit) {
+private fun NodeDetailDialog(
+    node: MeshNode,
+    samples: List<re.chasam.voicetastic.service.NodeSample>,
+    onDismiss: () -> Unit,
+) {
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(node.longName.ifBlank { node.nodeId }) },
@@ -530,6 +540,19 @@ private fun NodeDetailDialog(node: MeshNode, onDismiss: () -> Unit) {
                 node.uptimeSeconds?.let { NodeDetailRow("Uptime", formatUptime(it)) }
                 if (node.viaMqtt) NodeDetailRow("Via MQTT", "yes")
                 if (node.isFavorite) NodeDetailRow("Favorite", "yes")
+                if (samples.size >= 2) {
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "Trends",
+                        style = MaterialTheme.typography.titleSmall,
+                    )
+                    val battery = samples.mapNotNull { it.battery?.toFloat() }
+                    if (battery.size >= 2) {
+                        SparklineRow("Battery", battery, lo = 0f, hi = 100f, color = MaterialTheme.colorScheme.primary)
+                    }
+                    val snr = samples.map { it.snr }
+                    SparklineRow("SNR", snr, lo = -20f, hi = 20f, color = MaterialTheme.colorScheme.secondary)
+                }
             }
         },
         confirmButton = {
@@ -609,3 +632,50 @@ private fun ChannelPickerDialog(
     )
 }
 
+
+@Composable
+private fun SparklineRow(
+    label: String,
+    values: List<Float>,
+    lo: Float,
+    hi: Float,
+    color: androidx.compose.ui.graphics.Color,
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = label,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.width(112.dp),
+        )
+        androidx.compose.foundation.Canvas(
+            modifier = Modifier
+                .height(24.dp)
+                .width(160.dp)
+        ) {
+            val span = (hi - lo).coerceAtLeast(0.0001f)
+            val w = size.width
+            val h = size.height
+            // Background frame
+            drawRect(
+                color = color.copy(alpha = 0.25f),
+                size = size,
+                style = androidx.compose.ui.graphics.drawscope.Stroke(width = 1f),
+            )
+            if (values.size < 2) return@Canvas
+            val step = w / (values.size - 1).coerceAtLeast(1)
+            var prev: androidx.compose.ui.geometry.Offset? = null
+            values.forEachIndexed { i, v ->
+                val norm = ((v - lo) / span).coerceIn(0f, 1f)
+                val pt = androidx.compose.ui.geometry.Offset(step * i, h - norm * h)
+                prev?.let {
+                    drawLine(color = color, start = it, end = pt, strokeWidth = 2f)
+                }
+                prev = pt
+            }
+        }
+    }
+}

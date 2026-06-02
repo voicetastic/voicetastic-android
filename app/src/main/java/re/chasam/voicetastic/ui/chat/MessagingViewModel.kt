@@ -182,6 +182,9 @@ class MessagingViewModel(
     }.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
 
     val nodes: StateFlow<List<MeshNode>> = meshService.nodes
+    /** Per-node telemetry history exposed for the node-detail dialog's sparklines. */
+    val nodeHistory: StateFlow<Map<Int, List<re.chasam.voicetastic.service.NodeSample>>> =
+        meshService.nodeHistory
     val connectionState: StateFlow<String> = meshService.connectionState
 
     /**
