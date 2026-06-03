@@ -84,7 +84,7 @@ variables:
   PROTOC_INCLUDE: "/usr/include"
   # 3 GB heap fits AGP 9.x lint + Compose + Kotlin in-process.
   GRADLE_OPTS: "-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx3g -XX:MaxMetaspaceSize=512m -XX:+ExitOnOutOfMemoryError -Dkotlin.compiler.execution.strategy=in-process"
-  # Pull in the voicetastic-desktop submodule (Rust crates + .udl) so the
+  # Pull in the voicetastic-core submodule (Rust crates + .udl) so the
   # uniffiBindgen and cargoBuild<Abi> tasks have something to operate on.
   # Without this, the runner logs `Skipping Git submodules setup` and the
   # Gradle Exec tasks fail with "input file does not exist".
@@ -95,7 +95,7 @@ variables:
   # token. The runner image has neither ssh nor a deploy key, so let
   # GitLab rewrite it on-the-fly to HTTPS and auth with `CI_JOB_TOKEN`.
   #
-  # Requires the sibling project `voicetastic-desktop` to allow this
+  # Requires the sibling project `voicetastic-core` to allow this
   # project in its **Settings → CI/CD → Job token permissions**
   # allowlist; otherwise the clone fails with 404.
   GIT_SUBMODULE_FORCE_HTTPS: "true"
@@ -197,13 +197,13 @@ default:
     - key:
         files:
           - gradle/libs.versions.toml
-          - third_party/voicetastic-desktop/Cargo.lock
+          - third_party/voicetastic-core/Cargo.lock
       paths:
         - .gradle/caches
         - .gradle/wrapper
         - .cargo
         - .rustup
-        - third_party/voicetastic-desktop/target-android
+        - third_party/voicetastic-core/target-android
         - app/build/intermediates/aar_metadata_check
       policy: pull-push
 
@@ -216,13 +216,13 @@ default:
     - key:
         files:
           - gradle/libs.versions.toml
-          - third_party/voicetastic-desktop/Cargo.lock
+          - third_party/voicetastic-core/Cargo.lock
       paths:
         - .gradle/caches
         - .gradle/wrapper
         - .cargo
         - .rustup
-        - third_party/voicetastic-desktop/target-android
+        - third_party/voicetastic-core/target-android
         - app/build/intermediates/aar_metadata_check
       policy: pull
 

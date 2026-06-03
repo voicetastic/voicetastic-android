@@ -125,9 +125,15 @@ message DeviceMetrics {
 }
 
 message MyNodeInfo {
-  // Field tags must match real firmware. Modern firmware no longer sends
-  // firmware_version or has_gps here — firmware_version is in DeviceMetadata.
-  fixed32 my_node_num = 1;
+  // Field tags AND wire types must match the voicetastic-core Rust bridge,
+  // which is what actually re-encodes these messages for us (we never parse
+  // raw firmware frames directly). The bridge declares my_node_num as
+  // `uint32` (varint), so we must too — reading it as `fixed32` (wire type 5)
+  // silently drops the varint-encoded field and leaves my_node_num = 0, which
+  // surfaces as "!00000000" / the app name never being replaced in the nav.
+  // Modern firmware no longer sends firmware_version or has_gps here —
+  // firmware_version is in DeviceMetadata.
+  uint32 my_node_num = 1;
   uint32 reboot_count = 8;
   uint32 min_app_version = 11;
   bytes device_id = 12;

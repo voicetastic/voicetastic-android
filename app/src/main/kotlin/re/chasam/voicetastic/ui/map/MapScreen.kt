@@ -249,8 +249,20 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                         }
                     }
                     if (points.isNotEmpty() && mv.zoomLevelDouble <= 2.5) {
-                        val bb = org.osmdroid.util.BoundingBox.fromGeoPointsSafe(points)
-                        mv.zoomToBoundingBox(bb, true, 80)
+                        if (points.size == 1) {
+                            // A single coordinate yields a zero-area bounding
+                            // box, which zoomToBoundingBox snaps to its max
+                            // zoom (~street level) — far too close for "where
+                            // is my mesh". Center on it at the same zoom the
+                            // "my location" FAB uses, for a consistent feel.
+                            mv.controller.setCenter(points.first())
+                            mv.controller.setZoom(18.0)
+                        } else {
+                            // Fit all points, but cap the zoom so a tight
+                            // cluster of peers doesn't slam in to max zoom.
+                            val bb = org.osmdroid.util.BoundingBox.fromGeoPointsSafe(points)
+                            mv.zoomToBoundingBox(bb, true, 80, 16.0, null)
+                        }
                     }
                     mv.invalidate()
                 },

@@ -29,7 +29,7 @@ plugins {
 // `preBuild` so a plain `./gradlew :app:assembleDebug` produces a
 // working APK from a clean checkout (assuming Rust + NDK are installed).
 
-val rustRoot = file("$rootDir/third_party/voicetastic-desktop")
+val rustRoot = file("$rootDir/third_party/voicetastic-core")
 val rustBridgeCrate = "voicetastic-android-bridge"
 // Must match `[lib] name = "..."` in `voicetastic-android-bridge/Cargo.toml`.
 // Kept equal to the UDL namespace (`voicetastic`) so the Rust-side

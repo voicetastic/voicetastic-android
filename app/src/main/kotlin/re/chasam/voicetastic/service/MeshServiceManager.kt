@@ -464,6 +464,16 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
             override fun onMyInfo(encoded: ByteArray) {
                 runCatching { MeshProtos.MyNodeInfo.parseFrom(encoded) }
                     .onSuccess { info ->
+                        // `0` is never a real node num. A 0 here means the
+                        // `my_node_num` field was lost on the wire (e.g. a
+                        // proto wire-type mismatch in the native bridge) —
+                        // letting it through stamps `_myNodeId`/`_selfNode`
+                        // with "!00000000", which then surfaces in the app
+                        // nav. Ignore it and wait for a valid MyNodeInfo.
+                        if (info.myNodeNum == 0) {
+                            Log.w(TAG, "onMyInfo: ignoring my_node_num=0 (field likely dropped on decode)")
+                            return@onSuccess
+                        }
                         myNodeNum = info.myNodeNum
                         _myNodeId.value = MeshtasticBle.nodeNumToId(info.myNodeNum)
                         nodeMap[info.myNodeNum]?.let { _selfNode.value = it }
