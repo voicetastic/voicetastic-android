@@ -75,9 +75,19 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
     // drives the marker label so the source is never ambiguous.
     var selfPoint by remember { mutableStateOf<GeoPoint?>(null) }
     var selfFromPhone by remember { mutableStateOf(false) }
-    LaunchedEffect(selfNode, connectionState) {
-        val lat = selfNode?.latitudeI
-        val lon = selfNode?.longitudeI
+    // One-shot latch: true once we've centered the camera on the self node for
+    // this screen entry, so we don't fight the user's pan/zoom afterwards.
+    // Bare holder (not State) so writing it doesn't trigger recomposition;
+    // resets when the screen is re-entered (this remember is recreated).
+    val centeredOnSelf = remember { booleanArrayOf(false) }
+    LaunchedEffect(nodes, myNodeId, connectionState) {
+        // Resolve our position from our entry in the node list (the same
+        // source the working "center on me" FAB uses). The selfNode StateFlow
+        // can lack lat/lon even when the node reports a position (including a
+        // fixed one), which is why centering off it failed.
+        val myNode = nodes.firstOrNull { it.nodeId == myNodeId }
+        val lat = myNode?.latitudeI
+        val lon = myNode?.longitudeI
         if (lat != null && lon != null && (lat != 0 || lon != 0)) {
             selfPoint = GeoPoint(lat / 1e7, lon / 1e7)
             selfFromPhone = false
@@ -168,6 +178,22 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
         }
     }
 
+    // Center the map on the self node once, when both its position and a
+    // laid-out map are available. `mapView.post` defers the controller call to
+    // after the view has a size, mirroring the "center on me" FAB (which only
+    // ever runs post-layout, which is why it works while an in-`update`
+    // setCenter silently no-ops before first layout).
+    LaunchedEffect(selfPoint) {
+        val sp = selfPoint
+        if (sp != null && !centeredOnSelf[0]) {
+            centeredOnSelf[0] = true
+            mapView.post {
+                mapView.controller.setZoom(18.0)
+                mapView.controller.setCenter(sp)
+            }
+        }
+    }
+
     // Refresh markers from the latest nodes snapshot whenever it
     // changes. AndroidView's `update` lambda runs on recomposition.
     Column(modifier = Modifier.fillMaxSize()) {
@@ -248,18 +274,16 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                             mv.overlays.add(this)
                         }
                     }
-                    if (points.isNotEmpty() && mv.zoomLevelDouble <= 2.5) {
+                    // Self-centering is handled by the LaunchedEffect above
+                    // (post-layout). Until a self position exists, provisionally
+                    // frame known peers from the world view only, so the map
+                    // isn't stuck on the whole globe. The `!centeredOnSelf`
+                    // guard means a self fix still takes over when it arrives.
+                    if (!centeredOnSelf[0] && mv.zoomLevelDouble <= 2.5) {
                         if (points.size == 1) {
-                            // A single coordinate yields a zero-area bounding
-                            // box, which zoomToBoundingBox snaps to its max
-                            // zoom (~street level) — far too close for "where
-                            // is my mesh". Center on it at the same zoom the
-                            // "my location" FAB uses, for a consistent feel.
                             mv.controller.setCenter(points.first())
                             mv.controller.setZoom(18.0)
-                        } else {
-                            // Fit all points, but cap the zoom so a tight
-                            // cluster of peers doesn't slam in to max zoom.
+                        } else if (points.isNotEmpty()) {
                             val bb = org.osmdroid.util.BoundingBox.fromGeoPointsSafe(points)
                             mv.zoomToBoundingBox(bb, true, 80, 16.0, null)
                         }
