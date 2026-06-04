@@ -524,8 +524,18 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                             return@onSuccess
                         }
                         val nodeIdStr = MeshtasticBle.nodeNumToId(ni.num)
-                        val longName = if (ni.hasUser()) ni.user.longName else "Unknown"
-                        val shortName = if (ni.hasUser()) ni.user.shortName else "??"
+                        val existing = nodeMap[ni.num]
+                        // A NodeInfo without a user block (e.g. a position-only
+                        // broadcast from our own node) must NOT wipe a name we
+                        // already learned. Keep the prior name unless this packet
+                        // actually carries a non-empty one; only fall back to the
+                        // placeholders when we've never seen a name.
+                        val longName = ni.user.longName
+                            .takeIf { ni.hasUser() && it.isNotEmpty() }
+                            ?: existing?.longName ?: "Unknown"
+                        val shortName = ni.user.shortName
+                            .takeIf { ni.hasUser() && it.isNotEmpty() }
+                            ?: existing?.shortName ?: "??"
                         Log.d(
                             TAG,
                             "onNodeInfo: $nodeIdStr long='$longName' short='$shortName' " +
@@ -534,24 +544,27 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                         )
                         val metrics = if (ni.hasDeviceMetrics()) ni.deviceMetrics else null
                         val pos = if (ni.hasPosition()) ni.position else null
-                        val node = MeshNode(
+                        // Merge onto the existing entry so fields absent from this
+                        // packet (name, metrics, position) are preserved rather
+                        // than reset to null/0/placeholder.
+                        val node = (existing ?: MeshNode(nodeId = nodeIdStr)).copy(
                             nodeId = nodeIdStr,
                             longName = longName,
                             shortName = shortName,
-                            lastHeard = ni.lastHeard.toLong(),
-                            batteryLevel = metrics?.batteryLevel?.toInt(),
-                            snr = if (ni.snr != 0f) ni.snr else null,
-                            voltage = metrics?.voltage,
-                            channelUtilization = metrics?.channelUtilization,
-                            airUtilTx = metrics?.airUtilTx,
-                            uptimeSeconds = metrics?.uptimeSeconds,
-                            latitudeI = pos?.latitudeI,
-                            longitudeI = pos?.longitudeI,
-                            altitude = pos?.altitude,
+                            lastHeard = if (ni.lastHeard != 0) ni.lastHeard.toLong() else existing?.lastHeard ?: 0L,
+                            batteryLevel = metrics?.batteryLevel?.toInt() ?: existing?.batteryLevel,
+                            snr = if (ni.snr != 0f) ni.snr else existing?.snr,
+                            voltage = metrics?.voltage ?: existing?.voltage,
+                            channelUtilization = metrics?.channelUtilization ?: existing?.channelUtilization,
+                            airUtilTx = metrics?.airUtilTx ?: existing?.airUtilTx,
+                            uptimeSeconds = metrics?.uptimeSeconds ?: existing?.uptimeSeconds,
+                            latitudeI = pos?.latitudeI ?: existing?.latitudeI,
+                            longitudeI = pos?.longitudeI ?: existing?.longitudeI,
+                            altitude = pos?.altitude ?: existing?.altitude,
                             channel = ni.channel,
-                            hwModel = if (ni.hasUser()) ni.user.hwModelValue else 0,
-                            role = if (ni.hasUser()) ni.user.roleValue else 0,
-                            isLicensed = if (ni.hasUser()) ni.user.isLicensed else false,
+                            hwModel = if (ni.hasUser()) ni.user.hwModelValue else existing?.hwModel ?: 0,
+                            role = if (ni.hasUser()) ni.user.roleValue else existing?.role ?: 0,
+                            isLicensed = if (ni.hasUser()) ni.user.isLicensed else existing?.isLicensed ?: false,
                             viaMqtt = ni.viaMqtt,
                             isFavorite = ni.isFavorite,
                         )
@@ -616,6 +629,14 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                                 role = user.roleValue,
                                 isLicensed = user.isLicensed,
                             )
+                            // Write the owner name back into the node map too, not
+                            // just selfNode. Otherwise the map keeps a stale
+                            // "Unknown" entry and the next position-only NodeInfo
+                            // merges that placeholder back over the real name.
+                            myNum?.let {
+                                nodeMap[it] = node
+                                if (!configBurstInProgress) _nodes.value = nodeMap.values.toList()
+                            }
                             _selfNode.value = node
                         }
                     }
