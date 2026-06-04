@@ -56,6 +56,8 @@ class RustMeshSession private constructor(
         private const val BLE_SETTLE_DELAY_MS: ULong = 0u
         /** USB has no settle delay; the port is ready on `open`. */
         private const val USB_SETTLE_DELAY_MS: ULong = 0u
+        /** TCP has no settle delay; the socket is ready the moment it connects. */
+        private const val TCP_SETTLE_DELAY_MS: ULong = 0u
         /** How long we wait for [BleMeshTransport]'s setup callback before giving up. */
         private const val BLE_SETUP_TIMEOUT_MS = 15_000L
 
@@ -104,6 +106,23 @@ class RustMeshSession private constructor(
             transport.attachSink(sink)
             return RustMeshSession(meshService, transport, sink)
         }
+
+        /**
+         * Open a TCP-backed Rust session. The caller must have already
+         * connected the [TcpMeshTransport] socket; this helper adapts and
+         * wires it into the service.
+         */
+        fun openTcp(
+            meshService: MeshService,
+            transport: TcpMeshTransport,
+        ): RustMeshSession {
+            require(transport.isConnected) {
+                "TcpMeshTransport must be connected before opening a RustMeshSession"
+            }
+            val sink = meshService.connect(transport, TCP_SETTLE_DELAY_MS)
+            transport.attachSink(sink)
+            return RustMeshSession(meshService, transport, sink)
+        }
     }
 
     /**
@@ -123,6 +142,7 @@ class RustMeshSession private constructor(
         when (transport) {
             is BleMeshTransport -> transport.shutdown()
             is UsbMeshTransportV2 -> transport.shutdown()
+            is TcpMeshTransport -> transport.shutdown()
         }
         sink.shutdown()
     }

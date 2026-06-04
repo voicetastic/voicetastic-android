@@ -18,6 +18,7 @@ import androidx.compose.ui.unit.dp
 import com.hoho.android.usbserial.driver.UsbSerialDriver
 import re.chasam.voicetastic.R
 import re.chasam.voicetastic.service.MeshServiceManager
+import re.chasam.voicetastic.service.NetworkDevice
 
 /**
  * One screen, one list. USB and Bluetooth Meshtastic devices appear in the
@@ -34,6 +35,8 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
     val activeTransport by meshServiceManager.activeTransport.collectAsState()
     val usbDeviceConnected by meshServiceManager.usbConnectedDevice.collectAsState()
     val isNodeScanning by meshServiceManager.isNodeScanInProgress.collectAsState()
+    val networkDevices by meshServiceManager.discoveredNetworkDevices.collectAsState()
+    val isNetworkScanning by meshServiceManager.isNetworkScanning.collectAsState()
 
     // USB hot-plug events arrive through the OS broadcast pipeline, but we
     // also re-enumerate whenever something interesting happens on screen so
@@ -45,10 +48,11 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
 
     // Build the unified entry list (USB first — when a cable is plugged in
     // the user's intent is usually "talk to that one").
-    val entries: List<DeviceEntry> = remember(usbDrivers, bleDevices) {
+    val entries: List<DeviceEntry> = remember(usbDrivers, bleDevices, networkDevices) {
         buildList {
             usbDrivers.forEach { add(DeviceEntry.Usb(it)) }
             bleDevices.forEach { add(DeviceEntry.Ble(it)) }
+            networkDevices.forEach { add(DeviceEntry.Network(it)) }
         }
     }
 
@@ -68,20 +72,41 @@ fun DeviceScreen(meshServiceManager: MeshServiceManager) {
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.weight(1f)
                 )
-                if (isScanning) {
-                    CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                if (isScanning || isNetworkScanning) {
+                    CircularProgressIndicator(modifier = Modifier.size(20.dp), strokeWidth = 2.dp)
                     Spacer(Modifier.width(8.dp))
-                    TextButton(onClick = { meshServiceManager.stopScan() }) { Text(stringResource(R.string.device_stop)) }
-                } else {
-                    FilledTonalButton(onClick = {
-                        usbDrivers = meshServiceManager.discoverUsbDevices()
-                        meshServiceManager.startScan()
-                    }) {
-                        Icon(Icons.Default.Search, contentDescription = null)
-                        Spacer(Modifier.width(4.dp))
-                        Text(stringResource(R.string.device_scan))
-                    }
+                    TextButton(onClick = {
+                        meshServiceManager.stopScan()
+                        meshServiceManager.stopNetworkScan()
+                    }) { Text(stringResource(R.string.device_stop)) }
                 }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            // One button per transport: Bluetooth, Serial (USB), Network (mDNS).
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ScanButton(
+                    icon = Icons.Default.Bluetooth,
+                    label = stringResource(R.string.device_scan_bluetooth),
+                    enabled = !isScanning,
+                    modifier = Modifier.weight(1f),
+                ) { meshServiceManager.startScan() }
+                ScanButton(
+                    icon = Icons.Default.Usb,
+                    label = stringResource(R.string.device_scan_serial),
+                    enabled = true,
+                    modifier = Modifier.weight(1f),
+                ) { usbDrivers = meshServiceManager.discoverUsbDevices() }
+                ScanButton(
+                    icon = Icons.Default.Wifi,
+                    label = stringResource(R.string.device_scan_network),
+                    enabled = !isNetworkScanning,
+                    modifier = Modifier.weight(1f),
+                ) { meshServiceManager.startNetworkScan() }
             }
 
             Spacer(Modifier.height(8.dp))
@@ -199,6 +224,14 @@ private sealed class DeviceEntry {
         override val icon: ImageVector = Icons.Default.Bluetooth
         override val transportLabel: String = "BLE"
     }
+
+    data class Network(val device: NetworkDevice) : DeviceEntry() {
+        override val key: String = device.key
+        override val title: String = device.name
+        override val subtitle: String = "${device.host}:${device.port}"
+        override val icon: ImageVector = Icons.Default.Wifi
+        override val transportLabel: String = "NET"
+    }
 }
 
 @SuppressLint("MissingPermission")
@@ -214,6 +247,29 @@ private fun connect(meshServiceManager: MeshServiceManager, entry: DeviceEntry) 
                     if (granted) meshServiceManager.connectUsb(entry.driver)
                 }
             }
+        }
+        is DeviceEntry.Network -> meshServiceManager.connectTcp(entry.device.host, entry.device.port)
+    }
+}
+
+@Composable
+private fun ScanButton(
+    icon: ImageVector,
+    label: String,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit,
+) {
+    FilledTonalButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier,
+        contentPadding = PaddingValues(vertical = 10.dp, horizontal = 4.dp),
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(icon, contentDescription = null)
+            Spacer(Modifier.height(2.dp))
+            Text(label, style = MaterialTheme.typography.labelMedium, maxLines = 1)
         }
     }
 }

@@ -86,10 +86,10 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
         // can lack lat/lon even when the node reports a position (including a
         // fixed one), which is why centering off it failed.
         val myNode = nodes.firstOrNull { it.nodeId == myNodeId }
-        val lat = myNode?.latitudeI
-        val lon = myNode?.longitudeI
-        if (lat != null && lon != null && (lat != 0 || lon != 0)) {
-            selfPoint = GeoPoint(lat / 1e7, lon / 1e7)
+        val lat = myNode?.latitude
+        val lon = myNode?.longitude
+        if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
+            selfPoint = GeoPoint(lat, lon)
             selfFromPhone = false
         } else {
             // Only consult the phone GPS if location is already granted; we
@@ -197,7 +197,7 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
     // Refresh markers from the latest nodes snapshot whenever it
     // changes. AndroidView's `update` lambda runs on recomposition.
     Column(modifier = Modifier.fillMaxSize()) {
-        val plotted = nodes.count { it.latitudeI != null && it.longitudeI != null }
+        val plotted = nodes.count { it.latitude != null && it.longitude != null }
         Text(
             text = "Plotted $plotted of ${nodes.size} known peer(s).",
             style = MaterialTheme.typography.bodySmall,
@@ -223,13 +223,13 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                         // `selfPoint`, which also covers the no-GPS fallback),
                         // so skip it here to avoid a duplicate default marker.
                         if (selfId != null && node.nodeId == selfId) continue
-                        val lat = node.latitudeI ?: continue
-                        val lon = node.longitudeI ?: continue
+                        val lat = node.latitude ?: continue
+                        val lon = node.longitude ?: continue
                         // (0, 0) is the Meshtastic "unknown position"
                         // sentinel; skip so peers without a fix don't
                         // all pile up off the coast of Ghana.
-                        if (lat == 0 && lon == 0) continue
-                        val p = GeoPoint(lat / 1e7, lon / 1e7)
+                        if (lat == 0.0 && lon == 0.0) continue
+                        val p = GeoPoint(lat, lon)
                         points += p
                         val display = node.longName.ifBlank {
                             node.shortName.ifBlank { node.nodeId }
@@ -294,12 +294,12 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
             FloatingActionButton(
                 onClick = {
                     val myNode = nodes.firstOrNull { it.nodeId == myNodeId }
-                    val lat = myNode?.latitudeI
-                    val lon = myNode?.longitudeI
-                    if (lat != null && lon != null && (lat != 0 || lon != 0)) {
+                    val lat = myNode?.latitude
+                    val lon = myNode?.longitude
+                    if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
                         // Our node reported a position: use it directly.
-                        mapView.controller.setCenter(GeoPoint(lat / 1e7, lon / 1e7))
-                        mapView.controller.setZoom(16.0)
+                        mapView.controller.setCenter(GeoPoint(lat, lon))
+                        mapView.controller.setZoom(18.0)
                     } else {
                         // No node fix: fall back to the phone's own GPS, asking
                         // for location permission first if we don't have it.
@@ -308,7 +308,7 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                                 val fix = phoneLocation.currentFix()
                                 if (fix != null) {
                                     mapView.controller.setCenter(GeoPoint(fix.latitude, fix.longitude))
-                                    mapView.controller.setZoom(16.0)
+                                    mapView.controller.setZoom(18.0)
                                     Toast.makeText(
                                         context,
                                         "No position from your node: using phone GPS",
