@@ -37,6 +37,16 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
          * without leaking memory.
          */
         private const val NODE_HISTORY_CAP = 60
+
+        /**
+         * Auto-reconnect backoff bounds (BLE only). After an unexpected drop
+         * (e.g. the radio rebooting) we retry the last device starting at
+         * [RECONNECT_INITIAL_DELAY_MS] and doubling up to
+         * [RECONNECT_MAX_DELAY_MS], indefinitely, until we reconnect or the
+         * user deliberately disconnects.
+         */
+        private const val RECONNECT_INITIAL_DELAY_MS = 2_000L
+        private const val RECONNECT_MAX_DELAY_MS = 30_000L
     }
     // IncomingText / IncomingData / TransportType moved to MeshTypes.kt
     // so the [MeshFacade] interface can reference them without
@@ -48,6 +58,15 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
     private val rustService: MeshService = MeshService()
     private var rustSession: RustMeshSession? = null
+
+    // --- Auto-reconnect (BLE only) ---
+    // `lastBleDevice` is the device we should fall back to after an unexpected
+    // drop; `autoReconnect` is the user's intent to stay connected (set on a
+    // BLE connect, cleared on a deliberate disconnect) and gates the retry
+    // loop so we never reconnect after the user has chosen to disconnect.
+    private var lastBleDevice: BluetoothDevice? = null
+    @Volatile private var autoReconnect = false
+    private var reconnectJob: Job? = null
 
     // Nullable sentinel: `null` means MyNodeInfo hasn't been received yet.
     // Previously this was `Int = 0`, which collided with valid NodeInfo
@@ -170,6 +189,12 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     }
 
     override fun connectUsb(driver: UsbSerialDriver): Boolean {
+        // USB re-enumerates with a fresh handle on reboot (the OS attach
+        // broadcast drives reconnection), so we don't run the BLE retry loop
+        // here; just make sure any in-flight one is stood down.
+        autoReconnect = false
+        lastBleDevice = null
+        cancelReconnect()
         runCatching { rustSession?.close() }
         rustSession = null
         usbActive = true
@@ -197,6 +222,9 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     }
 
     override fun disconnectUsb() {
+        autoReconnect = false
+        lastBleDevice = null
+        cancelReconnect()
         runCatching { rustSession?.close() }
         rustSession = null
         usbTransport.disconnect()
@@ -377,6 +405,10 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     clearSessionState()
                     _activeTransport.value = TransportType.NONE
                     usbActive = false
+                    // Unexpected drop (radio reboot, link loss): start retrying
+                    // the last BLE device. No-op after a deliberate disconnect,
+                    // which clears `autoReconnect` first.
+                    maybeScheduleReconnect()
                 }
             }
         })
@@ -620,6 +652,22 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
     @SuppressLint("MissingPermission")
     override fun connect(device: BluetoothDevice) {
+        // User-initiated connect: arm auto-reconnect for this device and
+        // supersede any retry loop that was chasing a previous one.
+        autoReconnect = true
+        lastBleDevice = device
+        cancelReconnect()
+        openBle(device)
+    }
+
+    /**
+     * Open a BLE session to [device]. Shared by the user-initiated [connect]
+     * and the auto-reconnect loop, so it must NOT touch [autoReconnect] /
+     * [reconnectJob] (the caller owns that). A failed attempt schedules a
+     * retry so transient open failures during a reboot keep trying.
+     */
+    @SuppressLint("MissingPermission")
+    private fun openBle(device: BluetoothDevice) {
         stopScan()
         _connectionState.value = "CONNECTING"
         _activeTransport.value = TransportType.BLE
@@ -633,11 +681,19 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                 rustSession = null
                 _activeTransport.value = TransportType.NONE
                 _connectionState.value = "DISCONNECTED"
+                // The Rust state listener doesn't fire for an open that never
+                // connected, so kick the retry loop directly.
+                maybeScheduleReconnect()
             }
         }
     }
 
     override fun disconnect() {
+        // Deliberate disconnect: stop auto-reconnect and forget the device so
+        // the drop below isn't treated as something to recover from.
+        autoReconnect = false
+        lastBleDevice = null
+        cancelReconnect()
         runCatching { rustSession?.close() }
         rustSession = null
         if (usbActive) usbTransport.disconnect()
@@ -647,6 +703,48 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     }
 
     fun unbind() = disconnect()
+
+    /** Cancel any in-flight auto-reconnect loop. */
+    private fun cancelReconnect() {
+        reconnectJob?.cancel()
+        reconnectJob = null
+    }
+
+    /**
+     * Start (if not already running) a background loop that retries the last
+     * BLE device until we reconnect or the user disconnects. Safe to call from
+     * multiple threads / repeatedly; `@Synchronized` plus the active-job guard
+     * keep it to a single loop. Driven off [connectionState] so it backs off
+     * while an attempt is in flight and stops the moment we're connected.
+     */
+    @Synchronized
+    private fun maybeScheduleReconnect() {
+        if (!autoReconnect) return
+        val device = lastBleDevice ?: return
+        if (reconnectJob?.isActive == true) return
+        reconnectJob = scope.launch {
+            var delayMs = RECONNECT_INITIAL_DELAY_MS
+            while (isActive && autoReconnect) {
+                if (_connectionState.value == "CONNECTED") return@launch
+                // Wait first: gives a rebooting radio time to come back, and
+                // spaces out retries with exponential backoff.
+                delay(delayMs)
+                if (!autoReconnect) return@launch
+                when (_connectionState.value) {
+                    "CONNECTED" -> return@launch
+                    // An attempt is still establishing; let it resolve before
+                    // firing another (don't reset backoff).
+                    "CONNECTING" -> continue
+                    else -> {
+                        Log.i(TAG, "auto-reconnect: retrying ${device.address}")
+                        pushDebug("transport", "auto-reconnect: retrying…")
+                        openBle(device)
+                        delayMs = (delayMs * 2).coerceAtMost(RECONNECT_MAX_DELAY_MS)
+                    }
+                }
+            }
+        }
+    }
 
     override fun destroy() {
         disconnect()
