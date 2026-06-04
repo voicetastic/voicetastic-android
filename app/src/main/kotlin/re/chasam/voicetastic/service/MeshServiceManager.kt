@@ -37,6 +37,16 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
          * without leaking memory.
          */
         private const val NODE_HISTORY_CAP = 60
+
+        /**
+         * Auto-reconnect backoff bounds (BLE only). After an unexpected drop
+         * (e.g. the radio rebooting) we retry the last device starting at
+         * [RECONNECT_INITIAL_DELAY_MS] and doubling up to
+         * [RECONNECT_MAX_DELAY_MS], indefinitely, until we reconnect or the
+         * user deliberately disconnects.
+         */
+        private const val RECONNECT_INITIAL_DELAY_MS = 2_000L
+        private const val RECONNECT_MAX_DELAY_MS = 30_000L
     }
     // IncomingText / IncomingData / TransportType moved to MeshTypes.kt
     // so the [MeshFacade] interface can reference them without
@@ -48,6 +58,15 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
     private val rustService: MeshService = MeshService()
     private var rustSession: RustMeshSession? = null
+
+    // --- Auto-reconnect (BLE only) ---
+    // `lastBleDevice` is the device we should fall back to after an unexpected
+    // drop; `autoReconnect` is the user's intent to stay connected (set on a
+    // BLE connect, cleared on a deliberate disconnect) and gates the retry
+    // loop so we never reconnect after the user has chosen to disconnect.
+    private var lastBleDevice: BluetoothDevice? = null
+    @Volatile private var autoReconnect = false
+    private var reconnectJob: Job? = null
 
     // Nullable sentinel: `null` means MyNodeInfo hasn't been received yet.
     // Previously this was `Int = 0`, which collided with valid NodeInfo
@@ -170,6 +189,12 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     }
 
     override fun connectUsb(driver: UsbSerialDriver): Boolean {
+        // USB re-enumerates with a fresh handle on reboot (the OS attach
+        // broadcast drives reconnection), so we don't run the BLE retry loop
+        // here; just make sure any in-flight one is stood down.
+        autoReconnect = false
+        lastBleDevice = null
+        cancelReconnect()
         runCatching { rustSession?.close() }
         rustSession = null
         usbActive = true
@@ -197,6 +222,9 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     }
 
     override fun disconnectUsb() {
+        autoReconnect = false
+        lastBleDevice = null
+        cancelReconnect()
         runCatching { rustSession?.close() }
         rustSession = null
         usbTransport.disconnect()
@@ -377,6 +405,10 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     clearSessionState()
                     _activeTransport.value = TransportType.NONE
                     usbActive = false
+                    // Unexpected drop (radio reboot, link loss): start retrying
+                    // the last BLE device. No-op after a deliberate disconnect,
+                    // which clears `autoReconnect` first.
+                    maybeScheduleReconnect()
                 }
             }
         })
@@ -492,8 +524,18 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                             return@onSuccess
                         }
                         val nodeIdStr = MeshtasticBle.nodeNumToId(ni.num)
-                        val longName = if (ni.hasUser()) ni.user.longName else "Unknown"
-                        val shortName = if (ni.hasUser()) ni.user.shortName else "??"
+                        val existing = nodeMap[ni.num]
+                        // A NodeInfo without a user block (e.g. a position-only
+                        // broadcast from our own node) must NOT wipe a name we
+                        // already learned. Keep the prior name unless this packet
+                        // actually carries a non-empty one; only fall back to the
+                        // placeholders when we've never seen a name.
+                        val longName = ni.user.longName
+                            .takeIf { ni.hasUser() && it.isNotEmpty() }
+                            ?: existing?.longName ?: "Unknown"
+                        val shortName = ni.user.shortName
+                            .takeIf { ni.hasUser() && it.isNotEmpty() }
+                            ?: existing?.shortName ?: "??"
                         Log.d(
                             TAG,
                             "onNodeInfo: $nodeIdStr long='$longName' short='$shortName' " +
@@ -502,24 +544,27 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                         )
                         val metrics = if (ni.hasDeviceMetrics()) ni.deviceMetrics else null
                         val pos = if (ni.hasPosition()) ni.position else null
-                        val node = MeshNode(
+                        // Merge onto the existing entry so fields absent from this
+                        // packet (name, metrics, position) are preserved rather
+                        // than reset to null/0/placeholder.
+                        val node = (existing ?: MeshNode(nodeId = nodeIdStr)).copy(
                             nodeId = nodeIdStr,
                             longName = longName,
                             shortName = shortName,
-                            lastHeard = ni.lastHeard.toLong(),
-                            batteryLevel = metrics?.batteryLevel?.toInt(),
-                            snr = if (ni.snr != 0f) ni.snr else null,
-                            voltage = metrics?.voltage,
-                            channelUtilization = metrics?.channelUtilization,
-                            airUtilTx = metrics?.airUtilTx,
-                            uptimeSeconds = metrics?.uptimeSeconds,
-                            latitudeI = pos?.latitudeI,
-                            longitudeI = pos?.longitudeI,
-                            altitude = pos?.altitude,
+                            lastHeard = if (ni.lastHeard != 0) ni.lastHeard.toLong() else existing?.lastHeard ?: 0L,
+                            batteryLevel = metrics?.batteryLevel?.toInt() ?: existing?.batteryLevel,
+                            snr = if (ni.snr != 0f) ni.snr else existing?.snr,
+                            voltage = metrics?.voltage ?: existing?.voltage,
+                            channelUtilization = metrics?.channelUtilization ?: existing?.channelUtilization,
+                            airUtilTx = metrics?.airUtilTx ?: existing?.airUtilTx,
+                            uptimeSeconds = metrics?.uptimeSeconds ?: existing?.uptimeSeconds,
+                            latitudeI = pos?.latitudeI ?: existing?.latitudeI,
+                            longitudeI = pos?.longitudeI ?: existing?.longitudeI,
+                            altitude = pos?.altitude ?: existing?.altitude,
                             channel = ni.channel,
-                            hwModel = if (ni.hasUser()) ni.user.hwModelValue else 0,
-                            role = if (ni.hasUser()) ni.user.roleValue else 0,
-                            isLicensed = if (ni.hasUser()) ni.user.isLicensed else false,
+                            hwModel = if (ni.hasUser()) ni.user.hwModelValue else existing?.hwModel ?: 0,
+                            role = if (ni.hasUser()) ni.user.roleValue else existing?.role ?: 0,
+                            isLicensed = if (ni.hasUser()) ni.user.isLicensed else existing?.isLicensed ?: false,
                             viaMqtt = ni.viaMqtt,
                             isFavorite = ni.isFavorite,
                         )
@@ -584,6 +629,14 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                                 role = user.roleValue,
                                 isLicensed = user.isLicensed,
                             )
+                            // Write the owner name back into the node map too, not
+                            // just selfNode. Otherwise the map keeps a stale
+                            // "Unknown" entry and the next position-only NodeInfo
+                            // merges that placeholder back over the real name.
+                            myNum?.let {
+                                nodeMap[it] = node
+                                if (!configBurstInProgress) _nodes.value = nodeMap.values.toList()
+                            }
                             _selfNode.value = node
                         }
                     }
@@ -620,6 +673,22 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
     @SuppressLint("MissingPermission")
     override fun connect(device: BluetoothDevice) {
+        // User-initiated connect: arm auto-reconnect for this device and
+        // supersede any retry loop that was chasing a previous one.
+        autoReconnect = true
+        lastBleDevice = device
+        cancelReconnect()
+        openBle(device)
+    }
+
+    /**
+     * Open a BLE session to [device]. Shared by the user-initiated [connect]
+     * and the auto-reconnect loop, so it must NOT touch [autoReconnect] /
+     * [reconnectJob] (the caller owns that). A failed attempt schedules a
+     * retry so transient open failures during a reboot keep trying.
+     */
+    @SuppressLint("MissingPermission")
+    private fun openBle(device: BluetoothDevice) {
         stopScan()
         _connectionState.value = "CONNECTING"
         _activeTransport.value = TransportType.BLE
@@ -633,11 +702,19 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                 rustSession = null
                 _activeTransport.value = TransportType.NONE
                 _connectionState.value = "DISCONNECTED"
+                // The Rust state listener doesn't fire for an open that never
+                // connected, so kick the retry loop directly.
+                maybeScheduleReconnect()
             }
         }
     }
 
     override fun disconnect() {
+        // Deliberate disconnect: stop auto-reconnect and forget the device so
+        // the drop below isn't treated as something to recover from.
+        autoReconnect = false
+        lastBleDevice = null
+        cancelReconnect()
         runCatching { rustSession?.close() }
         rustSession = null
         if (usbActive) usbTransport.disconnect()
@@ -647,6 +724,48 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     }
 
     fun unbind() = disconnect()
+
+    /** Cancel any in-flight auto-reconnect loop. */
+    private fun cancelReconnect() {
+        reconnectJob?.cancel()
+        reconnectJob = null
+    }
+
+    /**
+     * Start (if not already running) a background loop that retries the last
+     * BLE device until we reconnect or the user disconnects. Safe to call from
+     * multiple threads / repeatedly; `@Synchronized` plus the active-job guard
+     * keep it to a single loop. Driven off [connectionState] so it backs off
+     * while an attempt is in flight and stops the moment we're connected.
+     */
+    @Synchronized
+    private fun maybeScheduleReconnect() {
+        if (!autoReconnect) return
+        val device = lastBleDevice ?: return
+        if (reconnectJob?.isActive == true) return
+        reconnectJob = scope.launch {
+            var delayMs = RECONNECT_INITIAL_DELAY_MS
+            while (isActive && autoReconnect) {
+                if (_connectionState.value == "CONNECTED") return@launch
+                // Wait first: gives a rebooting radio time to come back, and
+                // spaces out retries with exponential backoff.
+                delay(delayMs)
+                if (!autoReconnect) return@launch
+                when (_connectionState.value) {
+                    "CONNECTED" -> return@launch
+                    // An attempt is still establishing; let it resolve before
+                    // firing another (don't reset backoff).
+                    "CONNECTING" -> continue
+                    else -> {
+                        Log.i(TAG, "auto-reconnect: retrying ${device.address}")
+                        pushDebug("transport", "auto-reconnect: retrying…")
+                        openBle(device)
+                        delayMs = (delayMs * 2).coerceAtMost(RECONNECT_MAX_DELAY_MS)
+                    }
+                }
+            }
+        }
+    }
 
     override fun destroy() {
         disconnect()
