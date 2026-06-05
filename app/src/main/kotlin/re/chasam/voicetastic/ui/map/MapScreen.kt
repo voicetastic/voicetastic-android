@@ -1,11 +1,7 @@
 package re.chasam.voicetastic.ui.map
 
-import android.Manifest
-import android.content.pm.PackageManager
 import android.preference.PreferenceManager
 import android.widget.Toast
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -24,7 +20,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -41,9 +36,7 @@ import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.drawable.DrawableCompat
-import kotlinx.coroutines.launch
 import re.chasam.voicetastic.R
-import re.chasam.voicetastic.service.PhoneLocationProvider
 import re.chasam.voicetastic.ui.chat.MessagingViewModel
 
 /**
@@ -66,69 +59,30 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
     val selfNode by messagingViewModel.selfNode.collectAsState()
     val connectionState by messagingViewModel.connectionState.collectAsState()
     val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val phoneLocation = remember { PhoneLocationProvider(context) }
 
-    // Where to draw the "you" pin. Prefer our node's own reported position;
-    // if the node has no fix (e.g. its GPS is off) fall back to the phone's
-    // location so the user can still see where they are. `selfFromPhone`
-    // drives the marker label so the source is never ambiguous.
+    // Where to draw the "you" pin: our node's own reported position, and
+    // nothing else. The device is the sole position source — whether that
+    // fix comes from the radio's own GPS or a phone-provided position is the
+    // device's setting, decided on the radio. The app never reads the
+    // phone's location directly. Null until the node reports a fix.
     var selfPoint by remember { mutableStateOf<GeoPoint?>(null) }
-    var selfFromPhone by remember { mutableStateOf(false) }
     // One-shot latch: true once we've centered the camera on the self node for
     // this screen entry, so we don't fight the user's pan/zoom afterwards.
     // Bare holder (not State) so writing it doesn't trigger recomposition;
     // resets when the screen is re-entered (this remember is recreated).
     val centeredOnSelf = remember { booleanArrayOf(false) }
-    LaunchedEffect(nodes, myNodeId, connectionState) {
-        // Resolve our position from our entry in the node list (the same
-        // source the working "center on me" FAB uses). The selfNode StateFlow
-        // can lack lat/lon even when the node reports a position (including a
-        // fixed one), which is why centering off it failed.
+    LaunchedEffect(nodes, myNodeId) {
+        // Resolve our position from our own entry in the node list. The
+        // selfNode StateFlow can lack lat/lon even when the node reports a
+        // position (including a fixed one), which is why we read it here.
         val myNode = nodes.firstOrNull { it.nodeId == myNodeId }
         val lat = myNode?.latitude
         val lon = myNode?.longitude
-        if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
-            selfPoint = GeoPoint(lat, lon)
-            selfFromPhone = false
+        selfPoint = if (lat != null && lon != null && (lat != 0 || lon != 0)) {
+            // latitude/longitude are degrees * 1e7; divide for decimal degrees.
+            GeoPoint(lat / 1e7, lon / 1e7)
         } else {
-            // Only consult the phone GPS if location is already granted; we
-            // don't pop a permission dialog just for opening the map (the
-            // "my location" FAB is the explicit opt-in for that).
-            val granted = ContextCompat.checkSelfPermission(
-                context, Manifest.permission.ACCESS_FINE_LOCATION,
-            ) == PackageManager.PERMISSION_GRANTED
-            val fix = if (granted) phoneLocation.currentFix() else null
-            if (fix != null) {
-                selfPoint = GeoPoint(fix.latitude, fix.longitude)
-                selfFromPhone = true
-            } else {
-                selfPoint = null
-            }
-        }
-    }
-
-    // The "my location" FAB falls back to the phone's own GPS when our node
-    // has no fix. That needs ACCESS_FINE_LOCATION: run the action straight
-    // away if granted, otherwise prompt and run it once the grant lands.
-    var pendingLocationAction by remember { mutableStateOf<(() -> Unit)?>(null) }
-    val locationPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        val action = pendingLocationAction
-        pendingLocationAction = null
-        if (granted) action?.invoke()
-        else Toast.makeText(context, "Location permission denied", Toast.LENGTH_SHORT).show()
-    }
-    val withLocationPermission: (() -> Unit) -> Unit = { action ->
-        val granted = ContextCompat.checkSelfPermission(
-            context, Manifest.permission.ACCESS_FINE_LOCATION,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (granted) {
-            action()
-        } else {
-            pendingLocationAction = action
-            locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
+            null
         }
     }
 
@@ -220,16 +174,16 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                     val selfId = selfNode?.nodeId ?: myNodeId
                     for (node in nodes) {
                         // Our own node is drawn separately below (from
-                        // `selfPoint`, which also covers the no-GPS fallback),
-                        // so skip it here to avoid a duplicate default marker.
+                        // `selfPoint`), so skip it here to avoid a duplicate
+                        // default marker.
                         if (selfId != null && node.nodeId == selfId) continue
                         val lat = node.latitude ?: continue
                         val lon = node.longitude ?: continue
                         // (0, 0) is the Meshtastic "unknown position"
                         // sentinel; skip so peers without a fix don't
                         // all pile up off the coast of Ghana.
-                        if (lat == 0.0 && lon == 0.0) continue
-                        val p = GeoPoint(lat, lon)
+                        if (lat == 0 && lon == 0) continue
+                        val p = GeoPoint(lat / 1e7, lon / 1e7)
                         points += p
                         val display = node.longName.ifBlank {
                             node.shortName.ifBlank { node.nodeId }
@@ -247,8 +201,7 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                         }
                     }
                     // The "you" pin: tinted by link state (green = connected,
-                    // grey otherwise). Sourced from our node's position, or the
-                    // phone GPS when the node reports none.
+                    // grey otherwise). Sourced from our node's reported position.
                     selfPoint?.let { sp ->
                         points += sp
                         val name = selfNode?.longName?.ifBlank { null }
@@ -262,12 +215,14 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                         Marker(mv).apply {
                             position = sp
                             title = "$name (you)"
-                            snippet = if (selfFromPhone) {
-                                "Phone GPS (node reports no position)"
-                            } else {
-                                selfNode?.nodeId ?: ""
-                            }
-                            setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM)
+                            snippet = selfNode?.nodeId ?: ""
+                            // The Material "place" teardrop's tip is at y=22 of
+                            // the 24-unit viewport (2 units of empty space below
+                            // it), so anchoring at the image bottom (ANCHOR_BOTTOM
+                            // = 1.0) places the GeoPoint a few dp below the visible
+                            // tip and the pin reads slightly off. Anchor on the
+                            // actual tip instead.
+                            setAnchor(Marker.ANCHOR_CENTER, 22f / 24f)
                             icon = ContextCompat.getDrawable(context, R.drawable.ic_map_self_pin)
                                 ?.mutate()
                                 ?.also { DrawableCompat.setTint(it, tint) }
@@ -296,33 +251,18 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                     val myNode = nodes.firstOrNull { it.nodeId == myNodeId }
                     val lat = myNode?.latitude
                     val lon = myNode?.longitude
-                    if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
-                        // Our node reported a position: use it directly.
-                        mapView.controller.setCenter(GeoPoint(lat, lon))
+                    if (lat != null && lon != null && (lat != 0 || lon != 0)) {
+                        // Our node reported a position (degrees * 1e7): use it.
+                        mapView.controller.setCenter(GeoPoint(lat / 1e7, lon / 1e7))
                         mapView.controller.setZoom(18.0)
                     } else {
-                        // No node fix: fall back to the phone's own GPS, asking
-                        // for location permission first if we don't have it.
-                        withLocationPermission {
-                            scope.launch {
-                                val fix = phoneLocation.currentFix()
-                                if (fix != null) {
-                                    mapView.controller.setCenter(GeoPoint(fix.latitude, fix.longitude))
-                                    mapView.controller.setZoom(18.0)
-                                    Toast.makeText(
-                                        context,
-                                        "No position from your node: using phone GPS",
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
-                                } else {
-                                    Toast.makeText(
-                                        context,
-                                        "No position available from your node or phone GPS",
-                                        Toast.LENGTH_SHORT,
-                                    ).show()
-                                }
-                            }
-                        }
+                        // The device is the only position source; if it hasn't
+                        // reported a fix there's nothing to centre on.
+                        Toast.makeText(
+                            context,
+                            "Your node hasn't reported a position yet",
+                            Toast.LENGTH_SHORT,
+                        ).show()
                     }
                 },
                 modifier = Modifier.padding(16.dp).align(androidx.compose.ui.Alignment.BottomEnd),
