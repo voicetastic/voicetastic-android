@@ -11,6 +11,8 @@ import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.*
 import re.chasam.voicetastic.core.Ports
 import re.chasam.voicetastic.model.MeshNode
+import re.chasam.voicetastic.model.latDegrees
+import re.chasam.voicetastic.model.lonDegrees
 import uniffi.voicetastic.AckResultKind
 import uniffi.voicetastic.MeshAckListener
 import uniffi.voicetastic.MeshConfigListener
@@ -319,8 +321,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         val nodeId = MeshtasticBle.nodeNumToId(nodeNum)
         val node = (existing ?: MeshNode(nodeId = nodeId)).copy(
             nodeId = nodeId,
-            latitude = if (hasFix) pos.latitudeI else existing?.latitude,
-            longitude = if (hasFix) pos.longitudeI else existing?.longitude,
+            latitude = if (hasFix) pos.latDegrees else existing?.latitude,
+            longitude = if (hasFix) pos.lonDegrees else existing?.longitude,
             altitude = if (hasFix) pos.altitude else existing?.altitude,
             lastHeard = if (rxTime != 0L) rxTime else existing?.lastHeard ?: 0L,
         )
@@ -569,8 +571,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                             channelUtilization = metrics?.channelUtilization ?: existing?.channelUtilization,
                             airUtilTx = metrics?.airUtilTx ?: existing?.airUtilTx,
                             uptimeSeconds = metrics?.uptimeSeconds ?: existing?.uptimeSeconds,
-                            latitude = pos?.latitudeI ?: existing?.latitude,
-                            longitude = pos?.longitudeI ?: existing?.longitude,
+                            latitude = pos?.latDegrees ?: existing?.latitude,
+                            longitude = pos?.lonDegrees ?: existing?.longitude,
                             altitude = pos?.altitude ?: existing?.altitude,
                             channel = ni.channel,
                             hwModel = if (ni.hasUser()) ni.user.hwModelValue else existing?.hwModel ?: 0,
