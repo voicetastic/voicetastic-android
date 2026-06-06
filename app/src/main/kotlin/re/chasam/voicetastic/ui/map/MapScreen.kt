@@ -182,8 +182,8 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                         // (0, 0) is the Meshtastic "unknown position"
                         // sentinel; skip so peers without a fix don't
                         // all pile up off the coast of Ghana.
-                        if (lat == 0 && lon == 0) continue
-                        val p = GeoPoint(lat / 1e7, lon / 1e7)
+                        if (lat == 0.0 && lon == 0.0) continue
+                        val p = GeoPoint(lat, lon)
                         points += p
                         val display = node.longName.ifBlank {
                             node.shortName.ifBlank { node.nodeId }
