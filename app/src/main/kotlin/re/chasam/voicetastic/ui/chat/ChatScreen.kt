@@ -524,10 +524,10 @@ private fun NodeDetailDialog(
                     "${formatRelativeAge(node.lastHeard)} (${node.lastHeard})",
                 )
                 node.snr?.let { NodeDetailRow("SNR", "%.1f dB".format(it)) }
-                if (node.latitudeI != null && node.longitudeI != null) {
+                if (node.latitude != null && node.longitude != null) {
                     NodeDetailRow(
                         "Position",
-                        "%.5f, %.5f".format(node.latitudeI / 1e7, node.longitudeI / 1e7),
+                        "%.7f, %.7f".format(node.latitude, node.longitude),
                     )
                 }
                 node.altitude?.let { NodeDetailRow("Altitude", "$it m") }

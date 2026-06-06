@@ -41,16 +41,24 @@ interface MeshFacade {
     val usbConnectedDevice: StateFlow<UsbDevice?>
     val usbErrors: SharedFlow<String>
 
+    /** Meshtastic nodes discovered on the local network via mDNS. */
+    val discoveredNetworkDevices: StateFlow<List<NetworkDevice>>
+    val isNetworkScanning: StateFlow<Boolean>
+
     fun startScan()
     fun stopScan()
     fun discoverUsbDevices(): List<UsbSerialDriver>
     fun usbHasPermission(device: UsbDevice): Boolean
     fun requestUsbPermission(device: UsbDevice, onResult: (Boolean) -> Unit)
+    fun startNetworkScan()
+    fun stopNetworkScan()
 
     // ----- Connection control -----
 
     fun connect(device: BluetoothDevice)
     fun connectUsb(driver: UsbSerialDriver): Boolean
+    /** Connect to a Meshtastic node over TCP (default port 4403). */
+    fun connectTcp(host: String, port: Int): Boolean
     fun disconnect()
     fun disconnectUsb()
     fun onUsbDeviceDetached(device: UsbDevice)

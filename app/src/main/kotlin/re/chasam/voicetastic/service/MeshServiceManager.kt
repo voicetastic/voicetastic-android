@@ -55,6 +55,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
     val deviceDiscovery = DeviceDiscoveryManager(context)
+    private val networkDiscovery = NetworkDiscoveryManager(context)
 
     private val rustService: MeshService = MeshService()
     private var rustSession: RustMeshSession? = null
@@ -145,6 +146,9 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
      */
     private val _isNodeScanInProgress = MutableStateFlow(false)
     override val isNodeScanInProgress: StateFlow<Boolean> = _isNodeScanInProgress.asStateFlow()
+
+    override val discoveredNetworkDevices: StateFlow<List<NetworkDevice>> = networkDiscovery.devices
+    override val isNetworkScanning: StateFlow<Boolean> = networkDiscovery.isDiscovering
     private var nodeScanJob: Job? = null
 
     /**
@@ -314,8 +318,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         val nodeId = MeshtasticBle.nodeNumToId(nodeNum)
         val node = (existing ?: MeshNode(nodeId = nodeId)).copy(
             nodeId = nodeId,
-            latitudeI = if (hasFix) pos.latitudeI else existing?.latitudeI,
-            longitudeI = if (hasFix) pos.longitudeI else existing?.longitudeI,
+            latitude = if (hasFix) pos.latitudeI / 1e7 else existing?.latitude,
+            longitude = if (hasFix) pos.longitudeI / 1e7 else existing?.longitude,
             altitude = if (hasFix) pos.altitude else existing?.altitude,
             lastHeard = if (rxTime != 0L) rxTime else existing?.lastHeard ?: 0L,
         )
@@ -558,8 +562,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                             channelUtilization = metrics?.channelUtilization ?: existing?.channelUtilization,
                             airUtilTx = metrics?.airUtilTx ?: existing?.airUtilTx,
                             uptimeSeconds = metrics?.uptimeSeconds ?: existing?.uptimeSeconds,
-                            latitudeI = pos?.latitudeI ?: existing?.latitudeI,
-                            longitudeI = pos?.longitudeI ?: existing?.longitudeI,
+                            latitude = pos?.latitudeI?.let { it / 1e7 } ?: existing?.latitude,
+                            longitude = pos?.longitudeI?.let { it / 1e7 } ?: existing?.longitude,
                             altitude = pos?.altitude ?: existing?.altitude,
                             channel = ni.channel,
                             hwModel = if (ni.hasUser()) ni.user.hwModelValue else existing?.hwModel ?: 0,
@@ -669,6 +673,44 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         deviceDiscovery.stopBleScan()
     }
 
+    // ==========  NETWORK SCANNING  ==========
+
+    override fun startNetworkScan() = networkDiscovery.start()
+
+    override fun stopNetworkScan() = networkDiscovery.stop()
+
+    // ==========  NETWORK CONNECTION  ==========
+
+    override fun connectTcp(host: String, port: Int): Boolean {
+        // Like USB, TCP isn't part of the BLE auto-reconnect loop; stand any
+        // pending one down and forget the BLE device.
+        autoReconnect = false
+        lastBleDevice = null
+        cancelReconnect()
+        stopNetworkScan()
+        runCatching { rustSession?.close() }
+        rustSession = null
+        _activeTransport.value = TransportType.NETWORK
+        _connectionState.value = "CONNECTING"
+        configBurstInProgress = true
+        val transport = TcpMeshTransport(host, port)
+        if (!transport.connect()) {
+            _activeTransport.value = TransportType.NONE
+            _connectionState.value = "DISCONNECTED"
+            return false
+        }
+        return runCatching {
+            rustSession = RustMeshSession.openTcp(rustService, transport)
+            true
+        }.getOrElse { t ->
+            Log.e(TAG, "Rust TCP connect failed", t)
+            transport.shutdown()
+            _activeTransport.value = TransportType.NONE
+            _connectionState.value = "DISCONNECTED"
+            false
+        }
+    }
+
     // ==========  BLE CONNECTION  ==========
 
     @SuppressLint("MissingPermission")
@@ -771,6 +813,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         disconnect()
         usbTransport.destroy()
         deviceDiscovery.destroy()
+        networkDiscovery.destroy()
         runCatching { rustService.close() }
         scope.cancel()
     }

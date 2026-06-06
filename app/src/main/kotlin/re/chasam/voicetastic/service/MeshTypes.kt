@@ -9,7 +9,7 @@ package re.chasam.voicetastic.service
  */
 
 /** Which transport is currently active on the Rust mesh session. */
-enum class TransportType { NONE, BLE, USB }
+enum class TransportType { NONE, BLE, USB, NETWORK }
 
 /** Inbound text message after Rust → Kotlin demarshalling. */
 data class IncomingText(

@@ -18,9 +18,16 @@ data class MeshNode(
     val airUtilTx: Float? = null,
     /** Device uptime in seconds since boot. */
     val uptimeSeconds: Int? = null,
-    /** Latitude (1e-7 degrees) from the node's last reported position. */
-    val latitudeI: Int? = null,
-    val longitudeI: Int? = null,
+    /**
+     * Last reported position in **decimal degrees** (already converted from
+     * the protobuf `latitude_i`/`longitude_i`, which are degrees * 1e7). Stored
+     * as Double so call sites pass them straight to map/UI APIs without
+     * rescaling — passing a raw Int once selected osmdroid's microdegree
+     * GeoPoint overload and misplaced the pin.
+     */
+    val latitude: Double? = null,
+    val longitude: Double? = null,
+    /** Altitude in metres from the node's last reported position. */
     val altitude: Int? = null,
     /** Mesh channel index this node was last heard on. */
     val channel: Int = 0,
