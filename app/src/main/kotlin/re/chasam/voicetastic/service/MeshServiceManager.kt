@@ -313,18 +313,19 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         if (nodeNum == 0 || nodeNum == MeshtasticBle.BROADCAST_ADDR) return
         val pos = runCatching { MeshProtos.Position.parseFrom(payload) }.getOrNull()
             ?: return touchNodeLastHeard(nodeNum, rxTime)
+        val isSelf = myNodeNum != null && nodeNum == myNodeNum
         val hasFix = pos.latitudeI != 0 || pos.longitudeI != 0
         val existing = nodeMap[nodeNum]
         val nodeId = MeshtasticBle.nodeNumToId(nodeNum)
         val node = (existing ?: MeshNode(nodeId = nodeId)).copy(
             nodeId = nodeId,
-            latitude = if (hasFix) pos.latitudeI / 1e7 else existing?.latitude,
-            longitude = if (hasFix) pos.longitudeI / 1e7 else existing?.longitude,
+            latitude = if (hasFix) pos.latitudeI else existing?.latitude,
+            longitude = if (hasFix) pos.longitudeI else existing?.longitude,
             altitude = if (hasFix) pos.altitude else existing?.altitude,
             lastHeard = if (rxTime != 0L) rxTime else existing?.lastHeard ?: 0L,
         )
         nodeMap[nodeNum] = node
-        if (myNodeNum != null && nodeNum == myNodeNum) {
+        if (isSelf) {
             _selfNode.value = node
             if (hasFix) _myPosition.value = pos
         }
@@ -516,19 +517,25 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     }
             }
 
-            override fun onNodeInfo(encoded: ByteArray) {
+            override fun onNodeInfo(num: UInt, encoded: ByteArray) {
+                // The node number comes from the bridge as a separate FFI arg,
+                // not from the parsed proto: the vendored Android NodeInfo
+                // schema declares `num` as fixed32 while the bridge encodes it
+                // as uint32 (varint), so the in-proto `num` decodes to 0. The
+                // FFI arg is the authoritative value.
+                val nodeNum = num.toInt()
                 runCatching { MeshProtos.NodeInfo.parseFrom(encoded) }
                     .onSuccess { ni ->
                         // `0` is never a real Meshtastic node num; treat it as a
                         // stale / malformed entry and drop it. Letting it through
                         // produced "!00000000" rows in the node list and let
                         // pre-MyNodeInfo entries hijack `_owner`.
-                        if (ni.num == 0) {
+                        if (nodeNum == 0) {
                             Log.d(TAG, "onNodeInfo: dropping num=0 entry")
                             return@onSuccess
                         }
-                        val nodeIdStr = MeshtasticBle.nodeNumToId(ni.num)
-                        val existing = nodeMap[ni.num]
+                        val nodeIdStr = MeshtasticBle.nodeNumToId(nodeNum)
+                        val existing = nodeMap[nodeNum]
                         // A NodeInfo without a user block (e.g. a position-only
                         // broadcast from our own node) must NOT wipe a name we
                         // already learned. Keep the prior name unless this packet
@@ -562,8 +569,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                             channelUtilization = metrics?.channelUtilization ?: existing?.channelUtilization,
                             airUtilTx = metrics?.airUtilTx ?: existing?.airUtilTx,
                             uptimeSeconds = metrics?.uptimeSeconds ?: existing?.uptimeSeconds,
-                            latitude = pos?.latitudeI?.let { it / 1e7 } ?: existing?.latitude,
-                            longitude = pos?.longitudeI?.let { it / 1e7 } ?: existing?.longitude,
+                            latitude = pos?.latitudeI ?: existing?.latitude,
+                            longitude = pos?.longitudeI ?: existing?.longitude,
                             altitude = pos?.altitude ?: existing?.altitude,
                             channel = ni.channel,
                             hwModel = if (ni.hasUser()) ni.user.hwModelValue else existing?.hwModel ?: 0,
@@ -572,7 +579,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                             viaMqtt = ni.viaMqtt,
                             isFavorite = ni.isFavorite,
                         )
-                        nodeMap[ni.num] = node
+                        nodeMap[nodeNum] = node
                         if (!configBurstInProgress) {
                             _nodes.value = nodeMap.values.toList()
                         }
@@ -580,14 +587,14 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                         // the node-detail dialog can render trend
                         // sparklines.
                         pushNodeSample(
-                            nodeNum = ni.num,
+                            nodeNum = nodeNum,
                             battery = metrics?.batteryLevel?.toInt(),
                             snr = ni.snr,
                         )
                         val my = myNodeNum
-                        if (my != null && ni.num == my) _selfNode.value = node
-                        if (my != null && ni.num == my && ni.hasUser()) _owner.value = ni.user
-                        if (my != null && ni.num == my && ni.hasPosition()) _myPosition.value = ni.position
+                        if (my != null && nodeNum == my) _selfNode.value = node
+                        if (my != null && nodeNum == my && ni.hasUser()) _owner.value = ni.user
+                        if (my != null && nodeNum == my && ni.hasPosition()) _myPosition.value = ni.position
                     }
             }
 
