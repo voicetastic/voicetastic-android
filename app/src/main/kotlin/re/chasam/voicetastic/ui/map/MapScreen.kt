@@ -78,9 +78,9 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
         val myNode = nodes.firstOrNull { it.nodeId == myNodeId }
         val lat = myNode?.latitude
         val lon = myNode?.longitude
-        selfPoint = if (lat != null && lon != null && (lat != 0 || lon != 0)) {
-            // latitude/longitude are degrees * 1e7; divide for decimal degrees.
-            GeoPoint(lat / 1e7, lon / 1e7)
+        selfPoint = if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
+            // latitude/longitude are already decimal degrees.
+            GeoPoint(lat, lon)
         } else {
             null
         }
@@ -251,9 +251,9 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                     val myNode = nodes.firstOrNull { it.nodeId == myNodeId }
                     val lat = myNode?.latitude
                     val lon = myNode?.longitude
-                    if (lat != null && lon != null && (lat != 0 || lon != 0)) {
-                        // Our node reported a position (degrees * 1e7): use it.
-                        mapView.controller.setCenter(GeoPoint(lat / 1e7, lon / 1e7))
+                    if (lat != null && lon != null && (lat != 0.0 || lon != 0.0)) {
+                        // Our node reported a position (decimal degrees): use it.
+                        mapView.controller.setCenter(GeoPoint(lat, lon))
                         mapView.controller.setZoom(18.0)
                     } else {
                         // The device is the only position source; if it hasn't

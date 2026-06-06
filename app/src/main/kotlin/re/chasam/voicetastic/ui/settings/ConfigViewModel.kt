@@ -9,6 +9,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import re.chasam.voicetastic.model.AmrNbBitrate
 import re.chasam.voicetastic.model.Codec2Mode
+import re.chasam.voicetastic.model.latDegrees
+import re.chasam.voicetastic.model.lonDegrees
 import re.chasam.voicetastic.model.VoiceCodecChoice
 import re.chasam.voicetastic.model.VoiceConfig
 import re.chasam.voicetastic.service.MeshFacade
@@ -419,8 +421,8 @@ class ConfigViewModel(
         val cur = _positionState.value
         if (cur.fixedLatitude == 0.0 && cur.fixedLongitude == 0.0 && cur.fixedAltitude == 0) {
             _positionState.value = cur.copy(
-                fixedLatitude = p.latitudeI / 1e7,
-                fixedLongitude = p.longitudeI / 1e7,
+                fixedLatitude = p.latDegrees,
+                fixedLongitude = p.lonDegrees,
                 fixedAltitude = p.altitude
             )
         }
