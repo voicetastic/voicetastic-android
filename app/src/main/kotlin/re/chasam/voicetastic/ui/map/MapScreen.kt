@@ -86,10 +86,11 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
         }
     }
 
-    // osmdroid needs a one-time user-agent + tile cache config. The
-    // SharedPreferences-backed `Configuration` is the official entry
-    // point; we set it once per process.
-    remember {
+    val mapView = remember {
+        // osmdroid needs a one-time user-agent + tile cache config before
+        // any tile provider is built. The SharedPreferences-backed
+        // `Configuration` is the official entry point; we set it here so it
+        // runs once, synchronously, ahead of the MapView below.
         try {
             Configuration.getInstance().load(
                 context.applicationContext,
@@ -102,10 +103,7 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
         } catch (e: Exception) {
             android.util.Log.e("MapScreen", "osmdroid config failed", e)
         }
-        Unit
-    }
 
-    val mapView = remember {
         // osmdroid's built-in NetworkAvailabliltyCheck reports "no
         // network" on some de-Googled / custom ROMs (e.g. /e/OS),
         // so it silently skips every tile download and renders a blank
