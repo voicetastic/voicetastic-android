@@ -299,6 +299,15 @@ android {
     }
 }
 
+kotlin {
+    compilerOptions {
+        // Kotlin 2.3 explicit backing fields: lets a read-only public property
+        // (e.g. `StateFlow`) declare its own mutable backing field (e.g.
+        // `MutableStateFlow`) inline, removing the private `_name` mirror.
+        freeCompilerArgs.add("-Xexplicit-backing-fields")
+    }
+}
+
 protobuf {
     protoc {
         artifact = "com.google.protobuf:protoc:${libs.versions.protobuf.get()}"

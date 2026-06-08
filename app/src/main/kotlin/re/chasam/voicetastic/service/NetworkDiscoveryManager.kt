@@ -6,7 +6,6 @@ import android.net.nsd.NsdServiceInfo
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import java.util.ArrayDeque
 
 /** A Meshtastic node discovered on the local network via mDNS. */
@@ -34,11 +33,11 @@ class NetworkDiscoveryManager(context: Context) {
     private val nsd = context.applicationContext
         .getSystemService(Context.NSD_SERVICE) as NsdManager
 
-    private val _devices = MutableStateFlow<List<NetworkDevice>>(emptyList())
-    val devices: StateFlow<List<NetworkDevice>> = _devices.asStateFlow()
+    val devices: StateFlow<List<NetworkDevice>>
+        field = MutableStateFlow<List<NetworkDevice>>(emptyList())
 
-    private val _isDiscovering = MutableStateFlow(false)
-    val isDiscovering: StateFlow<Boolean> = _isDiscovering.asStateFlow()
+    val isDiscovering: StateFlow<Boolean>
+        field = MutableStateFlow(false)
 
     private var discoveryListener: NsdManager.DiscoveryListener? = null
 
@@ -49,10 +48,10 @@ class NetworkDiscoveryManager(context: Context) {
 
     fun start() {
         if (discoveryListener != null) return
-        _devices.value = emptyList()
+        devices.value = emptyList()
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {
-                _isDiscovering.value = true
+                isDiscovering.value = true
             }
 
             override fun onServiceFound(service: NsdServiceInfo) {
@@ -61,22 +60,22 @@ class NetworkDiscoveryManager(context: Context) {
 
             override fun onServiceLost(service: NsdServiceInfo) {
                 val name = service.serviceName
-                _devices.value = _devices.value.filterNot { it.name == name }
+                devices.value = devices.value.filterNot { it.name == name }
             }
 
             override fun onDiscoveryStopped(serviceType: String) {
-                _isDiscovering.value = false
+                isDiscovering.value = false
             }
 
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
                 Log.e(TAG, "discovery start failed: $errorCode")
-                _isDiscovering.value = false
+                isDiscovering.value = false
                 discoveryListener = null
             }
 
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {
                 Log.w(TAG, "discovery stop failed: $errorCode")
-                _isDiscovering.value = false
+                isDiscovering.value = false
                 discoveryListener = null
             }
         }
@@ -84,7 +83,7 @@ class NetworkDiscoveryManager(context: Context) {
         runCatching { nsd.discoverServices(SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener) }
             .onFailure {
                 Log.e(TAG, "discoverServices threw", it)
-                _isDiscovering.value = false
+                isDiscovering.value = false
                 discoveryListener = null
             }
     }
@@ -92,7 +91,7 @@ class NetworkDiscoveryManager(context: Context) {
     fun stop() {
         discoveryListener?.let { runCatching { nsd.stopServiceDiscovery(it) } }
         discoveryListener = null
-        _isDiscovering.value = false
+        isDiscovering.value = false
         synchronized(lock) { resolveQueue.clear(); resolving = false }
     }
 
@@ -113,7 +112,7 @@ class NetworkDiscoveryManager(context: Context) {
                 if (addr != null) {
                     val dev = NetworkDevice(info.serviceName, addr, info.port)
                     // De-dup by host:port; replace any stale same-key entry.
-                    _devices.value = _devices.value.filterNot { it.key == dev.key } + dev
+                    devices.value = devices.value.filterNot { it.key == dev.key } + dev
                 }
                 resolveNext()
             }

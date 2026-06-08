@@ -74,34 +74,34 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     // Nullable sentinel: `null` means MyNodeInfo hasn't been received yet.
     // Previously this was `Int = 0`, which collided with valid NodeInfo
     // bursts arriving before MyNodeInfo — any `ni.num == 0` entry would
-    // match the filter below and clobber `_owner` with a remote user, and
+    // match the filter below and clobber `owner` with a remote user, and
     // any 0-num peer would land in the node list as `!00000000`.
     private var myNodeNum: Int? = null
 
     // --- Public state flows ---
-    private val _connectionState = MutableStateFlow("DISCONNECTED")
-    override val connectionState: StateFlow<String> = _connectionState.asStateFlow()
+    final override val connectionState: StateFlow<String>
+        field = MutableStateFlow("DISCONNECTED")
 
-    private val _nodes = MutableStateFlow<List<MeshNode>>(emptyList())
-    override val nodes: StateFlow<List<MeshNode>> = _nodes.asStateFlow()
+    final override val nodes: StateFlow<List<MeshNode>>
+        field = MutableStateFlow<List<MeshNode>>(emptyList())
 
-    private val _incomingTextMessages = MutableSharedFlow<IncomingText>(extraBufferCapacity = 64)
-    override val incomingTextMessages: SharedFlow<IncomingText> = _incomingTextMessages.asSharedFlow()
+    final override val incomingTextMessages: SharedFlow<IncomingText>
+        field = MutableSharedFlow<IncomingText>(extraBufferCapacity = 64)
 
-    private val _incomingDataMessages = MutableSharedFlow<IncomingData>(extraBufferCapacity = 64)
-    override val incomingDataMessages: SharedFlow<IncomingData> = _incomingDataMessages.asSharedFlow()
+    final override val incomingDataMessages: SharedFlow<IncomingData>
+        field = MutableSharedFlow<IncomingData>(extraBufferCapacity = 64)
 
-    private val _ackEvents = MutableSharedFlow<MeshAckEvent>(extraBufferCapacity = 64)
-    override val ackEvents: SharedFlow<MeshAckEvent> = _ackEvents.asSharedFlow()
+    final override val ackEvents: SharedFlow<MeshAckEvent>
+        field = MutableSharedFlow<MeshAckEvent>(extraBufferCapacity = 64)
 
-    private val _debugLog = MutableStateFlow<List<DebugEntry>>(emptyList())
-    override val debugLog: StateFlow<List<DebugEntry>> = _debugLog.asStateFlow()
+    final override val debugLog: StateFlow<List<DebugEntry>>
+        field = MutableStateFlow<List<DebugEntry>>(emptyList())
 
-    private val _nodeHistory = MutableStateFlow<Map<Int, List<NodeSample>>>(emptyMap())
-    override val nodeHistory: StateFlow<Map<Int, List<NodeSample>>> = _nodeHistory.asStateFlow()
+    final override val nodeHistory: StateFlow<Map<Int, List<NodeSample>>>
+        field = MutableStateFlow<Map<Int, List<NodeSample>>>(emptyMap())
 
     private fun pushNodeSample(nodeNum: Int, battery: Int?, snr: Float) {
-        val current = _nodeHistory.value
+        val current = nodeHistory.value
         val buf = current[nodeNum].orEmpty()
         val last = buf.lastOrNull()
         // Skip when neither metric moved since the last sample — keeps
@@ -109,7 +109,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         if (last != null && last.battery == battery && kotlin.math.abs(last.snr - snr) < 0.01f) return
         val next = (buf + NodeSample(System.currentTimeMillis(), battery, snr))
             .takeLast(NODE_HISTORY_CAP)
-        _nodeHistory.value = current + (nodeNum to next)
+        nodeHistory.value = current + (nodeNum to next)
     }
 
     /**
@@ -118,27 +118,27 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
      * every event worth surfacing on the Debug screen.
      */
     private fun pushDebug(source: String, message: String, level: DebugLevel = DebugLevel.Info) {
-        val current = _debugLog.value
+        val current = debugLog.value
         val capped = if (current.size >= DEBUG_LOG_CAP) {
             current.drop(current.size - DEBUG_LOG_CAP + 1)
         } else {
             current
         }
-        _debugLog.value = capped + DebugEntry(level = level, source = source, message = message)
+        debugLog.value = capped + DebugEntry(level = level, source = source, message = message)
     }
 
     fun clearDebugLog() {
-        _debugLog.value = emptyList()
+        debugLog.value = emptyList()
     }
 
-    private val _myNodeId = MutableStateFlow<String?>(null)
-    override val myNodeId: StateFlow<String?> = _myNodeId.asStateFlow()
+    final override val myNodeId: StateFlow<String?>
+        field = MutableStateFlow<String?>(null)
 
-    private val _selfNode = MutableStateFlow<MeshNode?>(null)
-    override val selfNode: StateFlow<MeshNode?> = _selfNode.asStateFlow()
+    final override val selfNode: StateFlow<MeshNode?>
+        field = MutableStateFlow<MeshNode?>(null)
 
-    private val _firmwareVersion = MutableStateFlow<String?>(null)
-    override val firmwareVersion: StateFlow<String?> = _firmwareVersion.asStateFlow()
+    final override val firmwareVersion: StateFlow<String?>
+        field = MutableStateFlow<String?>(null)
 
     /**
      * `true` while a node-info scan is in progress. Held for a fixed window
@@ -146,8 +146,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
      * spinner and so peer NodeInfo replies have a chance to arrive.
      * Distinct from [isScanning] which tracks BLE device discovery.
      */
-    private val _isNodeScanInProgress = MutableStateFlow(false)
-    override val isNodeScanInProgress: StateFlow<Boolean> = _isNodeScanInProgress.asStateFlow()
+    final override val isNodeScanInProgress: StateFlow<Boolean>
+        field = MutableStateFlow(false)
 
     override val discoveredNetworkDevices: StateFlow<List<NetworkDevice>> = networkDiscovery.devices
     override val isNetworkScanning: StateFlow<Boolean> = networkDiscovery.isDiscovering
@@ -175,14 +175,14 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     override val usbConnectedDevice: StateFlow<UsbDevice?> = usbTransport.connectedDevice
     override val usbErrors: SharedFlow<String> = usbTransport.errors
 
-    private val _activeTransport = MutableStateFlow(TransportType.NONE)
-    override val activeTransport: StateFlow<TransportType> = _activeTransport.asStateFlow()
+    final override val activeTransport: StateFlow<TransportType>
+        field = MutableStateFlow(TransportType.NONE)
 
     // NOTE: the listener-registration `init { ... }` block lives further down
     // in the file, AFTER every StateFlow / nodeMap field is declared. The
     // Rust side fires `on_state(Disconnected)` synchronously during
     // `setStateListener`, which then re-enters our Kotlin code and calls
-    // `clearSessionState()` — that touches `nodeMap`, `_radioConfig`, ...,
+    // `clearSessionState()` — that touches `nodeMap`, `radioConfig`, ...,
     // so they MUST already be initialised. Kotlin runs initialisers in
     // declaration order, hence the deliberate placement.
 
@@ -204,14 +204,14 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         runCatching { rustSession?.close() }
         rustSession = null
         usbActive = true
-        _activeTransport.value = TransportType.USB
-        _connectionState.value = "CONNECTING"
+        activeTransport.value = TransportType.USB
+        connectionState.value = "CONNECTING"
         configBurstInProgress = true
         val ok = usbTransport.connect(driver)
         if (!ok) {
             usbActive = false
-            _activeTransport.value = TransportType.NONE
-            _connectionState.value = "DISCONNECTED"
+            activeTransport.value = TransportType.NONE
+            connectionState.value = "DISCONNECTED"
             return false
         }
         runCatching {
@@ -220,8 +220,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
             Log.e(TAG, "Rust USB connect failed", t)
             usbTransport.disconnect()
             usbActive = false
-            _activeTransport.value = TransportType.NONE
-            _connectionState.value = "DISCONNECTED"
+            activeTransport.value = TransportType.NONE
+            connectionState.value = "DISCONNECTED"
             return false
         }
         return ok
@@ -235,32 +235,32 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         rustSession = null
         usbTransport.disconnect()
         usbActive = false
-        _activeTransport.value = TransportType.NONE
+        activeTransport.value = TransportType.NONE
         clearSessionState()
-        _connectionState.value = "DISCONNECTED"
+        connectionState.value = "DISCONNECTED"
         Log.i(TAG, "Disconnected (USB)")
     }
 
     private fun clearSessionState() {
         myNodeNum = null
         configBurstInProgress = false
-        _myNodeId.value = null
-        _selfNode.value = null
-        _firmwareVersion.value = null
+        myNodeId.value = null
+        selfNode.value = null
+        firmwareVersion.value = null
         nodeMap.clear()
-        _nodes.value = emptyList()
-        _radioConfig.value = null
-        _deviceConfig.value = null
-        _positionConfig.value = null
-        _myPosition.value = null
-        _powerConfig.value = null
-        _networkConfig.value = null
-        _displayConfig.value = null
-        _bluetoothConfig.value = null
-        _mqttConfig.value = null
-        _channels.value = emptyList()
-        _owner.value = null
-        _moduleConfigs.value = emptyMap()
+        nodes.value = emptyList()
+        radioConfig.value = null
+        deviceConfig.value = null
+        positionConfig.value = null
+        myPosition.value = null
+        powerConfig.value = null
+        networkConfig.value = null
+        displayConfig.value = null
+        bluetoothConfig.value = null
+        mqttConfig.value = null
+        channels.value = emptyList()
+        owner.value = null
+        moduleConfigs.value = emptyMap()
     }
 
     override fun onUsbDeviceDetached(device: UsbDevice) {
@@ -284,8 +284,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
             isLicensed = user.isLicensed,
         )
         nodeMap[nodeNum] = node
-        if (myNodeNum != null && nodeNum == myNodeNum) _selfNode.value = node
-        _nodes.value = nodeMap.values.toList()
+        if (myNodeNum != null && nodeNum == myNodeNum) selfNode.value = node
+        nodes.value = nodeMap.values.toList()
     }
 
     private fun touchNodeLastHeard(nodeNum: Int, rxTime: Long) {
@@ -299,8 +299,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                 lastHeard = if (rxTime != 0L) rxTime else existing?.lastHeard ?: 0L
             )
         nodeMap[nodeNum] = node
-        if (myNodeNum != null && nodeNum == myNodeNum) _selfNode.value = node
-        _nodes.value = nodeMap.values.toList()
+        if (myNodeNum != null && nodeNum == myNodeNum) selfNode.value = node
+        nodes.value = nodeMap.values.toList()
     }
 
     /**
@@ -328,58 +328,58 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         )
         nodeMap[nodeNum] = node
         if (isSelf) {
-            _selfNode.value = node
-            if (hasFix) _myPosition.value = pos
+            selfNode.value = node
+            if (hasFix) myPosition.value = pos
         }
-        _nodes.value = nodeMap.values.toList()
+        nodes.value = nodeMap.values.toList()
     }
 
     // --- Per-section config flows ---
-    private val _radioConfig = MutableStateFlow<MeshProtos.Config.LoRaConfig?>(null)
-    override val radioConfig: StateFlow<MeshProtos.Config.LoRaConfig?> = _radioConfig.asStateFlow()
+    final override val radioConfig: StateFlow<MeshProtos.Config.LoRaConfig?>
+        field = MutableStateFlow<MeshProtos.Config.LoRaConfig?>(null)
 
-    private val _deviceConfig = MutableStateFlow<MeshProtos.Config.DeviceConfig?>(null)
-    override val deviceConfig: StateFlow<MeshProtos.Config.DeviceConfig?> = _deviceConfig.asStateFlow()
+    final override val deviceConfig: StateFlow<MeshProtos.Config.DeviceConfig?>
+        field = MutableStateFlow<MeshProtos.Config.DeviceConfig?>(null)
 
-    private val _positionConfig = MutableStateFlow<MeshProtos.Config.PositionConfig?>(null)
-    override val positionConfig: StateFlow<MeshProtos.Config.PositionConfig?> = _positionConfig.asStateFlow()
+    final override val positionConfig: StateFlow<MeshProtos.Config.PositionConfig?>
+        field = MutableStateFlow<MeshProtos.Config.PositionConfig?>(null)
 
-    private val _myPosition = MutableStateFlow<MeshProtos.Position?>(null)
-    override val myPosition: StateFlow<MeshProtos.Position?> = _myPosition.asStateFlow()
+    final override val myPosition: StateFlow<MeshProtos.Position?>
+        field = MutableStateFlow<MeshProtos.Position?>(null)
 
-    private val _powerConfig = MutableStateFlow<MeshProtos.Config.PowerConfig?>(null)
-    override val powerConfig: StateFlow<MeshProtos.Config.PowerConfig?> = _powerConfig.asStateFlow()
+    final override val powerConfig: StateFlow<MeshProtos.Config.PowerConfig?>
+        field = MutableStateFlow<MeshProtos.Config.PowerConfig?>(null)
 
-    private val _networkConfig = MutableStateFlow<MeshProtos.Config.NetworkConfig?>(null)
-    override val networkConfig: StateFlow<MeshProtos.Config.NetworkConfig?> = _networkConfig.asStateFlow()
+    final override val networkConfig: StateFlow<MeshProtos.Config.NetworkConfig?>
+        field = MutableStateFlow<MeshProtos.Config.NetworkConfig?>(null)
 
-    private val _displayConfig = MutableStateFlow<MeshProtos.Config.DisplayConfig?>(null)
-    override val displayConfig: StateFlow<MeshProtos.Config.DisplayConfig?> = _displayConfig.asStateFlow()
+    final override val displayConfig: StateFlow<MeshProtos.Config.DisplayConfig?>
+        field = MutableStateFlow<MeshProtos.Config.DisplayConfig?>(null)
 
-    private val _bluetoothConfig = MutableStateFlow<MeshProtos.Config.BluetoothConfig?>(null)
-    override val bluetoothConfig: StateFlow<MeshProtos.Config.BluetoothConfig?> = _bluetoothConfig.asStateFlow()
+    final override val bluetoothConfig: StateFlow<MeshProtos.Config.BluetoothConfig?>
+        field = MutableStateFlow<MeshProtos.Config.BluetoothConfig?>(null)
 
-    private val _mqttConfig = MutableStateFlow<MeshProtos.ModuleConfig.MQTTConfig?>(null)
-    override val mqttConfig: StateFlow<MeshProtos.ModuleConfig.MQTTConfig?> = _mqttConfig.asStateFlow()
+    final override val mqttConfig: StateFlow<MeshProtos.ModuleConfig.MQTTConfig?>
+        field = MutableStateFlow<MeshProtos.ModuleConfig.MQTTConfig?>(null)
 
-    private val _channels = MutableStateFlow<List<MeshProtos.Channel>>(emptyList())
-    override val channels: StateFlow<List<MeshProtos.Channel>> = _channels.asStateFlow()
+    final override val channels: StateFlow<List<MeshProtos.Channel>>
+        field = MutableStateFlow<List<MeshProtos.Channel>>(emptyList())
 
-    private val _owner = MutableStateFlow<MeshProtos.User?>(null)
-    override val owner: StateFlow<MeshProtos.User?> = _owner.asStateFlow()
+    final override val owner: StateFlow<MeshProtos.User?>
+        field = MutableStateFlow<MeshProtos.User?>(null)
 
-    private val _moduleConfigs = MutableStateFlow<Map<String, MeshProtos.ModuleConfig>>(emptyMap())
-    override val moduleConfigs: StateFlow<Map<String, MeshProtos.ModuleConfig>> = _moduleConfigs.asStateFlow()
+    final override val moduleConfigs: StateFlow<Map<String, MeshProtos.ModuleConfig>>
+        field = MutableStateFlow<Map<String, MeshProtos.ModuleConfig>>(emptyMap())
 
-    private val _configComplete = MutableSharedFlow<Int>(extraBufferCapacity = 8)
-    override val configComplete: SharedFlow<Int> = _configComplete.asSharedFlow()
+    final override val configComplete: SharedFlow<Int>
+        field = MutableSharedFlow<Int>(extraBufferCapacity = 8)
 
     private val nodeMap = mutableMapOf<Int, MeshNode>()
 
     @Volatile private var configBurstInProgress = false
 
     override val isConnected: Boolean
-        get() = _connectionState.value == "CONNECTED" || _connectionState.value == "CONNECTING"
+        get() = connectionState.value == "CONNECTED" || connectionState.value == "CONNECTING"
 
     init {
         rustService.setStateListener(object : MeshStateListener {
@@ -400,17 +400,17 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                 // still flow through.
                 val now = System.currentTimeMillis()
                 if (mapped == "CONNECTING"
-                    && _connectionState.value == "CONNECTED"
+                    && connectionState.value == "CONNECTED"
                     && now < suppressConnectingUntilMs
                 ) {
                     Log.d(TAG, "state: suppressing transient CONNECTING during scan refresh")
                     return
                 }
 
-                _connectionState.value = mapped
+                connectionState.value = mapped
                 if (state == MeshConnectionState.DISCONNECTED) {
                     clearSessionState()
-                    _activeTransport.value = TransportType.NONE
+                    activeTransport.value = TransportType.NONE
                     usbActive = false
                     // Unexpected drop (radio reboot, link loss): start retrying
                     // the last BLE device. No-op after a deliberate disconnect,
@@ -433,7 +433,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     "mesh",
                     "rx text from=${message.fromId} to=$toId ch=${message.channel} (${message.text.length}B)",
                 )
-                _incomingTextMessages.tryEmit(
+                incomingTextMessages.tryEmit(
                     IncomingText(
                         from = message.fromId,
                         to = toId,
@@ -462,7 +462,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     Ports.POSITION_APP -> mergeNodeFromPosition(fromNum, message.payload, message.rxTime.toLong())
                 }
 
-                _incomingDataMessages.tryEmit(
+                incomingDataMessages.tryEmit(
                     IncomingData(
                         from = fromId,
                         to = toId,
@@ -495,7 +495,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     "ack id=0x${packetId.toString(16)} → $status",
                     level,
                 )
-                _ackEvents.tryEmit(MeshAckEvent(packetId, status))
+                ackEvents.tryEmit(MeshAckEvent(packetId, status))
             }
         })
 
@@ -506,7 +506,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                         // `0` is never a real node num. A 0 here means the
                         // `my_node_num` field was lost on the wire (e.g. a
                         // proto wire-type mismatch in the native bridge) —
-                        // letting it through stamps `_myNodeId`/`_selfNode`
+                        // letting it through stamps `myNodeId`/`selfNode`
                         // with "!00000000", which then surfaces in the app
                         // nav. Ignore it and wait for a valid MyNodeInfo.
                         if (info.myNodeNum == 0) {
@@ -514,8 +514,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                             return@onSuccess
                         }
                         myNodeNum = info.myNodeNum
-                        _myNodeId.value = MeshtasticBle.nodeNumToId(info.myNodeNum)
-                        nodeMap[info.myNodeNum]?.let { _selfNode.value = it }
+                        myNodeId.value = MeshtasticBle.nodeNumToId(info.myNodeNum)
+                        nodeMap[info.myNodeNum]?.let { selfNode.value = it }
                     }
             }
 
@@ -531,7 +531,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                         // `0` is never a real Meshtastic node num; treat it as a
                         // stale / malformed entry and drop it. Letting it through
                         // produced "!00000000" rows in the node list and let
-                        // pre-MyNodeInfo entries hijack `_owner`.
+                        // pre-MyNodeInfo entries hijack `owner`.
                         if (nodeNum == 0) {
                             Log.d(TAG, "onNodeInfo: dropping num=0 entry")
                             return@onSuccess
@@ -583,7 +583,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                         )
                         nodeMap[nodeNum] = node
                         if (!configBurstInProgress) {
-                            _nodes.value = nodeMap.values.toList()
+                            nodes.value = nodeMap.values.toList()
                         }
                         // Append a telemetry sample (battery + SNR) so
                         // the node-detail dialog can render trend
@@ -594,9 +594,9 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                             snr = ni.snr,
                         )
                         val my = myNodeNum
-                        if (my != null && nodeNum == my) _selfNode.value = node
-                        if (my != null && nodeNum == my && ni.hasUser()) _owner.value = ni.user
-                        if (my != null && nodeNum == my && ni.hasPosition()) _myPosition.value = ni.position
+                        if (my != null && nodeNum == my) selfNode.value = node
+                        if (my != null && nodeNum == my && ni.hasUser()) owner.value = ni.user
+                        if (my != null && nodeNum == my && ni.hasPosition()) myPosition.value = ni.position
                     }
             }
 
@@ -611,7 +611,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                         // Only the MQTT variant has a UI today; the rest
                         // are swallowed (Telemetry, Serial, etc.).
                         if (mc.hasMqtt()) {
-                            _mqttConfig.value = mc.mqtt
+                            mqttConfig.value = mc.mqtt
                         }
                     }
             }
@@ -619,21 +619,21 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
             override fun onChannel(encoded: ByteArray) {
                 runCatching { MeshProtos.Channel.parseFrom(encoded) }
                     .onSuccess { ch ->
-                        val current = _channels.value.toMutableList()
+                        val current = channels.value.toMutableList()
                         val idx = current.indexOfFirst { it.index == ch.index }
                         if (idx >= 0) current[idx] = ch else current.add(ch)
-                        _channels.value = current
+                        channels.value = current
                     }
             }
 
             override fun onOwner(encoded: ByteArray) {
                 runCatching { MeshProtos.User.parseFrom(encoded) }
                     .onSuccess { user ->
-                        _owner.value = user
-                        val myId = _myNodeId.value
+                        owner.value = user
+                        val myId = myNodeId.value
                         if (myId != null) {
                             val myNum = myNodeNum
-                            val existing = if (myNum != null) nodeMap[myNum] else _selfNode.value
+                            val existing = if (myNum != null) nodeMap[myNum] else selfNode.value
                             val node = (existing ?: MeshNode(nodeId = myId)).copy(
                                 nodeId = myId,
                                 longName = user.longName.ifEmpty { existing?.longName ?: "Unknown" },
@@ -648,9 +648,9 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                             // merges that placeholder back over the real name.
                             myNum?.let {
                                 nodeMap[it] = node
-                                if (!configBurstInProgress) _nodes.value = nodeMap.values.toList()
+                                if (!configBurstInProgress) nodes.value = nodeMap.values.toList()
                             }
-                            _selfNode.value = node
+                            selfNode.value = node
                         }
                     }
             }
@@ -659,15 +659,15 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                 runCatching { MeshProtos.DeviceMetadata.parseFrom(encoded) }
                     .onSuccess { md ->
                         if (md.firmwareVersion.isNotEmpty()) {
-                            _firmwareVersion.value = md.firmwareVersion
+                            firmwareVersion.value = md.firmwareVersion
                         }
                     }
             }
 
             override fun onConfigComplete(nonce: UInt) {
                 configBurstInProgress = false
-                _nodes.value = nodeMap.values.toList()
-                _configComplete.tryEmit(nonce.toInt())
+                nodes.value = nodeMap.values.toList()
+                configComplete.tryEmit(nonce.toInt())
             }
         })
     }
@@ -699,13 +699,13 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         stopNetworkScan()
         runCatching { rustSession?.close() }
         rustSession = null
-        _activeTransport.value = TransportType.NETWORK
-        _connectionState.value = "CONNECTING"
+        activeTransport.value = TransportType.NETWORK
+        connectionState.value = "CONNECTING"
         configBurstInProgress = true
         val transport = TcpMeshTransport(host, port)
         if (!transport.connect()) {
-            _activeTransport.value = TransportType.NONE
-            _connectionState.value = "DISCONNECTED"
+            activeTransport.value = TransportType.NONE
+            connectionState.value = "DISCONNECTED"
             return false
         }
         return runCatching {
@@ -714,8 +714,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         }.getOrElse { t ->
             Log.e(TAG, "Rust TCP connect failed", t)
             transport.shutdown()
-            _activeTransport.value = TransportType.NONE
-            _connectionState.value = "DISCONNECTED"
+            activeTransport.value = TransportType.NONE
+            connectionState.value = "DISCONNECTED"
             false
         }
     }
@@ -741,8 +741,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     @SuppressLint("MissingPermission")
     private fun openBle(device: BluetoothDevice) {
         stopScan()
-        _connectionState.value = "CONNECTING"
-        _activeTransport.value = TransportType.BLE
+        connectionState.value = "CONNECTING"
+        activeTransport.value = TransportType.BLE
         configBurstInProgress = true
         scope.launch {
             runCatching {
@@ -751,8 +751,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
             }.onFailure { t ->
                 Log.e(TAG, "Rust BLE connect failed", t)
                 rustSession = null
-                _activeTransport.value = TransportType.NONE
-                _connectionState.value = "DISCONNECTED"
+                activeTransport.value = TransportType.NONE
+                connectionState.value = "DISCONNECTED"
                 // The Rust state listener doesn't fire for an open that never
                 // connected, so kick the retry loop directly.
                 maybeScheduleReconnect()
@@ -770,8 +770,8 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         rustSession = null
         if (usbActive) usbTransport.disconnect()
         usbActive = false
-        _activeTransport.value = TransportType.NONE
-        _connectionState.value = "DISCONNECTED"
+        activeTransport.value = TransportType.NONE
+        connectionState.value = "DISCONNECTED"
     }
 
     fun unbind() = disconnect()
@@ -797,12 +797,12 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         reconnectJob = scope.launch {
             var delayMs = RECONNECT_INITIAL_DELAY_MS
             while (isActive && autoReconnect) {
-                if (_connectionState.value == "CONNECTED") return@launch
+                if (connectionState.value == "CONNECTED") return@launch
                 // Wait first: gives a rebooting radio time to come back, and
                 // spaces out retries with exponential backoff.
                 delay(delayMs)
                 if (!autoReconnect) return@launch
-                when (_connectionState.value) {
+                when (connectionState.value) {
                     "CONNECTED" -> return@launch
                     // An attempt is still establishing; let it resolve before
                     // firing another (don't reset backoff).
@@ -868,7 +868,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
             Log.w(TAG, "requestNodeInfo: not connected")
             return false
         }
-        val user = _owner.value ?: _myNodeId.value?.let { id ->
+        val user = owner.value ?: myNodeId.value?.let { id ->
             Log.d(TAG, "requestNodeInfo: owner not yet known; using minimal User(id=$id)")
             MeshProtos.User.newBuilder().setId(id).build()
         } ?: run {
@@ -903,14 +903,14 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                 false, // want_ack
                 true,  // want_response
             )
-            Log.d(TAG, "requestNodeInfo: refresh+broadcast fired (pktId=$pktId, ownerKnown=${_owner.value != null})")
+            Log.d(TAG, "requestNodeInfo: refresh+broadcast fired (pktId=$pktId, ownerKnown=${owner.value != null})")
 
             // Visual scan window: 10 s covers the refresh burst + typical
             // peer reply latency, and self-clears so the button reverts.
             nodeScanJob?.cancel()
             nodeScanJob = scope.launch {
-                _isNodeScanInProgress.value = true
-                try { delay(10_000) } finally { _isNodeScanInProgress.value = false }
+                isNodeScanInProgress.value = true
+                try { delay(10_000) } finally { isNodeScanInProgress.value = false }
             }
             true
         } catch (e: Exception) {
@@ -922,31 +922,31 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     private fun handleConfig(config: MeshProtos.Config) {
         when {
             config.hasLora() -> {
-                _radioConfig.value = config.lora
+                radioConfig.value = config.lora
                 Log.i(TAG, "LoRa config: region=${config.lora.region}, preset=${config.lora.modemPreset}")
             }
             config.hasDevice() -> {
-                _deviceConfig.value = config.device
+                deviceConfig.value = config.device
                 Log.i(TAG, "Device config: role=${config.device.role}")
             }
             config.hasPosition() -> {
-                _positionConfig.value = config.position
+                positionConfig.value = config.position
                 Log.i(TAG, "Position config: gps=${config.position.gpsEnabled}, broadcast=${config.position.positionBroadcastSecs}s")
             }
             config.hasPower() -> {
-                _powerConfig.value = config.power
+                powerConfig.value = config.power
                 Log.i(TAG, "Power config: power_saving=${config.power.isPowerSaving}")
             }
             config.hasNetwork() -> {
-                _networkConfig.value = config.network
+                networkConfig.value = config.network
                 Log.i(TAG, "Network config: wifi=${config.network.wifiEnabled}")
             }
             config.hasDisplay() -> {
-                _displayConfig.value = config.display
+                displayConfig.value = config.display
                 Log.i(TAG, "Display config: screen_on=${config.display.screenOnSecs}s")
             }
             config.hasBluetooth() -> {
-                _bluetoothConfig.value = config.bluetooth
+                bluetoothConfig.value = config.bluetooth
                 Log.i(TAG, "Bluetooth config: enabled=${config.bluetooth.enabled}, mode=${config.bluetooth.mode}")
             }
         }
@@ -960,7 +960,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
     override fun sendTextTracked(text: String, destination: String?, channel: Int): UInt? {
         if (!isConnected) {
-            Log.w(TAG, "sendText dropped: not connected (state=${_connectionState.value}, transport=${_activeTransport.value})")
+            Log.w(TAG, "sendText dropped: not connected (state=${connectionState.value}, transport=${activeTransport.value})")
             return null
         }
 
@@ -1006,7 +1006,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         wantResponse: Boolean,
     ): Boolean {
         if (!isConnected) {
-            Log.w(TAG, "sendData dropped: not connected (state=${_connectionState.value}, transport=${_activeTransport.value})")
+            Log.w(TAG, "sendData dropped: not connected (state=${connectionState.value}, transport=${activeTransport.value})")
             return false
         }
 
@@ -1131,7 +1131,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         // Drop the local mirror in lockstep so the UI forgets the wiped
         // peers immediately, then re-pull config sections.
         nodeMap.clear()
-        _nodes.value = emptyList()
+        nodes.value = emptyList()
         runCatching { rustService.refreshConfig() }
             .onFailure { Log.e(TAG, "resetNodeDb: refreshConfig failed", it) }
         return true

@@ -32,8 +32,8 @@ class ConfigViewModel(
     val firmwareVersion: StateFlow<String?> = meshService.firmwareVersion
 
     // --- Status ---
-    private val _configStatus = MutableStateFlow<String?>(null)
-    val configStatus: StateFlow<String?> = _configStatus.asStateFlow()
+    val configStatus: StateFlow<String?>
+        field = MutableStateFlow<String?>(null)
 
     // ========================  OWNER  ========================
 
@@ -43,8 +43,8 @@ class ConfigViewModel(
         val isLicensed: Boolean = false
     )
 
-    private val _ownerState = MutableStateFlow(OwnerUiState())
-    val ownerState: StateFlow<OwnerUiState> = _ownerState.asStateFlow()
+    val ownerState: StateFlow<OwnerUiState>
+        field = MutableStateFlow(OwnerUiState())
 
     // ========================  LORA  ========================
 
@@ -66,8 +66,8 @@ class ConfigViewModel(
         val ignoreMqtt: Boolean = false
     )
 
-    private val _loraState = MutableStateFlow(LoraUiState())
-    val loraState: StateFlow<LoraUiState> = _loraState.asStateFlow()
+    val loraState: StateFlow<LoraUiState>
+        field = MutableStateFlow(LoraUiState())
 
     val regions: List<String> = enumNames(MeshProtos.Config.LoRaConfig.RegionCode.values())
     val modemPresets: List<String> = enumNames(MeshProtos.Config.LoRaConfig.ModemPreset.values())
@@ -87,8 +87,8 @@ class ConfigViewModel(
         val disableTripleClick: Boolean = false
     )
 
-    private val _deviceState = MutableStateFlow(DeviceUiState())
-    val deviceState: StateFlow<DeviceUiState> = _deviceState.asStateFlow()
+    val deviceState: StateFlow<DeviceUiState>
+        field = MutableStateFlow(DeviceUiState())
 
     val deviceRoles: List<String> = enumNames(MeshProtos.Config.DeviceConfig.Role.values())
 
@@ -123,8 +123,8 @@ class ConfigViewModel(
         val fixedAltitude: Int = 0
     )
 
-    private val _positionState = MutableStateFlow(PositionUiState())
-    val positionState: StateFlow<PositionUiState> = _positionState.asStateFlow()
+    val positionState: StateFlow<PositionUiState>
+        field = MutableStateFlow(PositionUiState())
 
     val gpsModes: List<String> = enumNames(MeshProtos.Config.PositionConfig.GpsMode.values())
 
@@ -141,8 +141,8 @@ class ConfigViewModel(
         val shutdownOnPowerLoss: Boolean = false
     )
 
-    private val _powerState = MutableStateFlow(PowerUiState())
-    val powerState: StateFlow<PowerUiState> = _powerState.asStateFlow()
+    val powerState: StateFlow<PowerUiState>
+        field = MutableStateFlow(PowerUiState())
 
     // ========================  NETWORK  ========================
 
@@ -156,8 +156,8 @@ class ConfigViewModel(
         val rsyslogServer: String = ""
     )
 
-    private val _networkState = MutableStateFlow(NetworkUiState())
-    val networkState: StateFlow<NetworkUiState> = _networkState.asStateFlow()
+    val networkState: StateFlow<NetworkUiState>
+        field = MutableStateFlow(NetworkUiState())
 
     val addressModes: List<String> = enumNames(MeshProtos.Config.NetworkConfig.AddressMode.values())
 
@@ -176,8 +176,8 @@ class ConfigViewModel(
         val wakeOnTapOrMotion: Boolean = false
     )
 
-    private val _displayState = MutableStateFlow(DisplayUiState())
-    val displayState: StateFlow<DisplayUiState> = _displayState.asStateFlow()
+    val displayState: StateFlow<DisplayUiState>
+        field = MutableStateFlow(DisplayUiState())
 
     val gpsFormats: List<String> = enumNames(MeshProtos.Config.DisplayConfig.GpsCoordinateFormat.values())
     val displayUnits: List<String> = enumNames(MeshProtos.Config.DisplayConfig.DisplayUnits.values())
@@ -192,8 +192,8 @@ class ConfigViewModel(
         val fixedPin: Int = 0
     )
 
-    private val _bluetoothState = MutableStateFlow(BluetoothUiState())
-    val bluetoothState: StateFlow<BluetoothUiState> = _bluetoothState.asStateFlow()
+    val bluetoothState: StateFlow<BluetoothUiState>
+        field = MutableStateFlow(BluetoothUiState())
 
     val pairingModes: List<String> = enumNames(MeshProtos.Config.BluetoothConfig.PairingMode.values())
 
@@ -215,8 +215,8 @@ class ConfigViewModel(
         val mapShouldReportLocation: Boolean = false,
     )
 
-    private val _mqttState = MutableStateFlow(MqttUiState())
-    val mqttState: StateFlow<MqttUiState> = _mqttState.asStateFlow()
+    val mqttState: StateFlow<MqttUiState>
+        field = MutableStateFlow(MqttUiState())
 
     // ========================  CHANNELS  ========================
 
@@ -229,8 +229,8 @@ class ConfigViewModel(
         val downlinkEnabled: Boolean = false
     )
 
-    private val _channelsState = MutableStateFlow<List<ChannelUiState>>(emptyList())
-    val channelsState: StateFlow<List<ChannelUiState>> = _channelsState.asStateFlow()
+    val channelsState: StateFlow<List<ChannelUiState>>
+        field = MutableStateFlow<List<ChannelUiState>>(emptyList())
 
     val channelRoles: List<String> = enumNames(MeshProtos.Channel.Role.values())
 
@@ -255,7 +255,7 @@ class ConfigViewModel(
             meshService.configComplete.collect {
                 clearDirty()
                 syncFromServiceFlows()
-                _configStatus.value = "Config received"
+                configStatus.value = "Config received"
             }
         }
 
@@ -300,7 +300,7 @@ class ConfigViewModel(
         viewModelScope.launch {
             meshService.owner.collect { user ->
                 if (user != null && !isDirty("owner")) {
-                    _ownerState.value = OwnerUiState(
+                    ownerState.value = OwnerUiState(
                         longName = user.longName,
                         shortName = user.shortName,
                         isLicensed = user.isLicensed
@@ -311,7 +311,7 @@ class ConfigViewModel(
         viewModelScope.launch {
             meshService.channels.collect { chList ->
                 if (chList.isNotEmpty() && !isDirty("channels")) {
-                    _channelsState.value = chList.map { mapChannel(it) }
+                    channelsState.value = chList.map { mapChannel(it) }
                 }
             }
         }
@@ -343,7 +343,7 @@ class ConfigViewModel(
         meshService.mqttConfig.value?.let { if (!isDirty("mqtt")) updateMqttFromProto(it) }
         meshService.owner.value?.let { user ->
             if (!isDirty("owner")) {
-                _ownerState.value = OwnerUiState(
+                ownerState.value = OwnerUiState(
                     longName = user.longName,
                     shortName = user.shortName,
                     isLicensed = user.isLicensed
@@ -352,12 +352,12 @@ class ConfigViewModel(
         }
         val chList = meshService.channels.value
         if (chList.isNotEmpty() && !isDirty("channels")) {
-            _channelsState.value = chList.map { mapChannel(it) }
+            channelsState.value = chList.map { mapChannel(it) }
         }
     }
 
     private fun updateLoraFromProto(lora: MeshProtos.Config.LoRaConfig) {
-        _loraState.value = LoraUiState(
+        loraState.value = LoraUiState(
             region = enumDisplay(lora.region, "UNSET"),
             modemPreset = enumDisplay(lora.modemPreset, "LONG_FAST"),
             usePreset = lora.usePreset,
@@ -377,7 +377,7 @@ class ConfigViewModel(
     }
 
     private fun updateDeviceFromProto(dev: MeshProtos.Config.DeviceConfig) {
-        _deviceState.value = DeviceUiState(
+        deviceState.value = DeviceUiState(
             role = enumDisplay(dev.role, "CLIENT"),
             serialEnabled = dev.serialEnabled,
             debugLogEnabled = dev.debugLogEnabled,
@@ -392,8 +392,8 @@ class ConfigViewModel(
     }
 
     private fun updatePositionFromProto(pos: MeshProtos.Config.PositionConfig) {
-        val current = _positionState.value
-        _positionState.value = current.copy(
+        val current = positionState.value
+        positionState.value = current.copy(
             positionBroadcastSecs = pos.positionBroadcastSecs,
             positionBroadcastSmartEnabled = pos.positionBroadcastSmartEnabled,
             fixedPosition = pos.fixedPosition,
@@ -418,9 +418,9 @@ class ConfigViewModel(
     private fun updateFixedPositionFromMyPosition(p: MeshProtos.Position) {
         // A (0, 0) payload means "no fix" - nothing useful to seed.
         if (p.latitudeI == 0 && p.longitudeI == 0) return
-        val cur = _positionState.value
+        val cur = positionState.value
         if (cur.fixedLatitude == 0.0 && cur.fixedLongitude == 0.0 && cur.fixedAltitude == 0) {
-            _positionState.value = cur.copy(
+            positionState.value = cur.copy(
                 fixedLatitude = p.latDegrees,
                 fixedLongitude = p.lonDegrees,
                 fixedAltitude = p.altitude
@@ -429,7 +429,7 @@ class ConfigViewModel(
     }
 
     private fun updatePowerFromProto(pwr: MeshProtos.Config.PowerConfig) {
-        _powerState.value = PowerUiState(
+        powerState.value = PowerUiState(
             isPowerSaving = pwr.isPowerSaving,
             onBatteryShutdownAfterSecs = pwr.onBatteryShutdownAfterSecs,
             adcMultiplierOverride = pwr.adcMultiplierOverride,
@@ -442,7 +442,7 @@ class ConfigViewModel(
     }
 
     private fun updateNetworkFromProto(net: MeshProtos.Config.NetworkConfig) {
-        _networkState.value = NetworkUiState(
+        networkState.value = NetworkUiState(
             wifiEnabled = net.wifiEnabled,
             wifiSsid = net.wifiSsid,
             wifiPsk = net.wifiPsk,
@@ -454,7 +454,7 @@ class ConfigViewModel(
     }
 
     private fun updateDisplayFromProto(dsp: MeshProtos.Config.DisplayConfig) {
-        _displayState.value = DisplayUiState(
+        displayState.value = DisplayUiState(
             screenOnSecs = dsp.screenOnSecs,
             gpsFormat = enumDisplay(dsp.gpsFormat, "DEC"),
             autoScreenCarouselSecs = dsp.autoScreenCarouselSecs,
@@ -469,7 +469,7 @@ class ConfigViewModel(
     }
 
     private fun updateBluetoothFromProto(bt: MeshProtos.Config.BluetoothConfig) {
-        _bluetoothState.value = BluetoothUiState(
+        bluetoothState.value = BluetoothUiState(
             enabled = bt.enabled,
             mode = enumDisplay(bt.mode, "RANDOM_PIN"),
             fixedPin = bt.fixedPin
@@ -478,7 +478,7 @@ class ConfigViewModel(
 
     private fun updateMqttFromProto(m: MeshProtos.ModuleConfig.MQTTConfig) {
         val map = if (m.hasMapReportSettings()) m.mapReportSettings else null
-        _mqttState.value = MqttUiState(
+        mqttState.value = MqttUiState(
             enabled = m.enabled,
             address = m.address,
             username = m.username,
@@ -500,49 +500,49 @@ class ConfigViewModel(
     // overwrite the user's in-progress edits.
 
     // --- Owner ---
-    fun setOwnerLongName(name: String) { markDirty("owner"); _ownerState.value = _ownerState.value.copy(longName = name) }
-    fun setOwnerShortName(name: String) { markDirty("owner"); _ownerState.value = _ownerState.value.copy(shortName = name) }
-    fun setOwnerIsLicensed(licensed: Boolean) { markDirty("owner"); _ownerState.value = _ownerState.value.copy(isLicensed = licensed) }
+    fun setOwnerLongName(name: String) { markDirty("owner"); ownerState.value = ownerState.value.copy(longName = name) }
+    fun setOwnerShortName(name: String) { markDirty("owner"); ownerState.value = ownerState.value.copy(shortName = name) }
+    fun setOwnerIsLicensed(licensed: Boolean) { markDirty("owner"); ownerState.value = ownerState.value.copy(isLicensed = licensed) }
 
     // --- LoRa ---
-    fun setLoraRegion(region: String) { markDirty("lora"); _loraState.value = _loraState.value.copy(region = region) }
-    fun setLoraModemPreset(preset: String) { markDirty("lora"); _loraState.value = _loraState.value.copy(modemPreset = preset) }
-    fun setLoraUsePreset(v: Boolean) { markDirty("lora"); _loraState.value = _loraState.value.copy(usePreset = v) }
-    fun setLoraBandwidth(v: Int) { markDirty("lora"); _loraState.value = _loraState.value.copy(bandwidth = v) }
-    fun setLoraSpreadFactor(v: Int) { markDirty("lora"); _loraState.value = _loraState.value.copy(spreadFactor = v) }
-    fun setLoraCodingRate(v: Int) { markDirty("lora"); _loraState.value = _loraState.value.copy(codingRate = v) }
-    fun setLoraFrequencyOffset(v: Float) { markDirty("lora"); _loraState.value = _loraState.value.copy(frequencyOffset = v) }
-    fun setLoraHopLimit(v: Int) { markDirty("lora"); _loraState.value = _loraState.value.copy(hopLimit = v.coerceIn(1, 7)) }
-    fun setLoraTxEnabled(v: Boolean) { markDirty("lora"); _loraState.value = _loraState.value.copy(txEnabled = v) }
-    fun setLoraTxPower(v: Int) { markDirty("lora"); _loraState.value = _loraState.value.copy(txPower = v) }
-    fun setLoraChannelNum(v: Int) { markDirty("lora"); _loraState.value = _loraState.value.copy(channelNum = v) }
-    fun setLoraOverrideDutyCycle(v: Boolean) { markDirty("lora"); _loraState.value = _loraState.value.copy(overrideDutyCycle = v) }
-    fun setLoraSx126xRxBoostedGain(v: Boolean) { markDirty("lora"); _loraState.value = _loraState.value.copy(sx126xRxBoostedGain = v) }
-    fun setLoraOverrideFrequency(v: Float) { markDirty("lora"); _loraState.value = _loraState.value.copy(overrideFrequency = v) }
-    fun setLoraIgnoreMqtt(v: Boolean) { markDirty("lora"); _loraState.value = _loraState.value.copy(ignoreMqtt = v) }
+    fun setLoraRegion(region: String) { markDirty("lora"); loraState.value = loraState.value.copy(region = region) }
+    fun setLoraModemPreset(preset: String) { markDirty("lora"); loraState.value = loraState.value.copy(modemPreset = preset) }
+    fun setLoraUsePreset(v: Boolean) { markDirty("lora"); loraState.value = loraState.value.copy(usePreset = v) }
+    fun setLoraBandwidth(v: Int) { markDirty("lora"); loraState.value = loraState.value.copy(bandwidth = v) }
+    fun setLoraSpreadFactor(v: Int) { markDirty("lora"); loraState.value = loraState.value.copy(spreadFactor = v) }
+    fun setLoraCodingRate(v: Int) { markDirty("lora"); loraState.value = loraState.value.copy(codingRate = v) }
+    fun setLoraFrequencyOffset(v: Float) { markDirty("lora"); loraState.value = loraState.value.copy(frequencyOffset = v) }
+    fun setLoraHopLimit(v: Int) { markDirty("lora"); loraState.value = loraState.value.copy(hopLimit = v.coerceIn(1, 7)) }
+    fun setLoraTxEnabled(v: Boolean) { markDirty("lora"); loraState.value = loraState.value.copy(txEnabled = v) }
+    fun setLoraTxPower(v: Int) { markDirty("lora"); loraState.value = loraState.value.copy(txPower = v) }
+    fun setLoraChannelNum(v: Int) { markDirty("lora"); loraState.value = loraState.value.copy(channelNum = v) }
+    fun setLoraOverrideDutyCycle(v: Boolean) { markDirty("lora"); loraState.value = loraState.value.copy(overrideDutyCycle = v) }
+    fun setLoraSx126xRxBoostedGain(v: Boolean) { markDirty("lora"); loraState.value = loraState.value.copy(sx126xRxBoostedGain = v) }
+    fun setLoraOverrideFrequency(v: Float) { markDirty("lora"); loraState.value = loraState.value.copy(overrideFrequency = v) }
+    fun setLoraIgnoreMqtt(v: Boolean) { markDirty("lora"); loraState.value = loraState.value.copy(ignoreMqtt = v) }
 
     // --- Device ---
-    fun setDeviceRole(role: String) { markDirty("device"); _deviceState.value = _deviceState.value.copy(role = role) }
-    fun setDeviceSerialEnabled(v: Boolean) { markDirty("device"); _deviceState.value = _deviceState.value.copy(serialEnabled = v) }
-    fun setDeviceDebugLogEnabled(v: Boolean) { markDirty("device"); _deviceState.value = _deviceState.value.copy(debugLogEnabled = v) }
-    fun setDeviceButtonGpio(v: Int) { markDirty("device"); _deviceState.value = _deviceState.value.copy(buttonGpio = v) }
-    fun setDeviceBuzzerGpio(v: Int) { markDirty("device"); _deviceState.value = _deviceState.value.copy(buzzerGpio = v) }
-    fun setDeviceRebroadcastMode(mode: String) { markDirty("device"); _deviceState.value = _deviceState.value.copy(rebroadcastMode = mode) }
-    fun setDeviceNodeInfoBroadcastSecs(v: Int) { markDirty("device"); _deviceState.value = _deviceState.value.copy(nodeInfoBroadcastSecs = v) }
-    fun setDeviceDoubleTapAsButtonPress(v: Boolean) { markDirty("device"); _deviceState.value = _deviceState.value.copy(doubleTapAsButtonPress = v) }
-    fun setDeviceIsManaged(v: Boolean) { markDirty("device"); _deviceState.value = _deviceState.value.copy(isManaged = v) }
-    fun setDeviceDisableTripleClick(v: Boolean) { markDirty("device"); _deviceState.value = _deviceState.value.copy(disableTripleClick = v) }
+    fun setDeviceRole(role: String) { markDirty("device"); deviceState.value = deviceState.value.copy(role = role) }
+    fun setDeviceSerialEnabled(v: Boolean) { markDirty("device"); deviceState.value = deviceState.value.copy(serialEnabled = v) }
+    fun setDeviceDebugLogEnabled(v: Boolean) { markDirty("device"); deviceState.value = deviceState.value.copy(debugLogEnabled = v) }
+    fun setDeviceButtonGpio(v: Int) { markDirty("device"); deviceState.value = deviceState.value.copy(buttonGpio = v) }
+    fun setDeviceBuzzerGpio(v: Int) { markDirty("device"); deviceState.value = deviceState.value.copy(buzzerGpio = v) }
+    fun setDeviceRebroadcastMode(mode: String) { markDirty("device"); deviceState.value = deviceState.value.copy(rebroadcastMode = mode) }
+    fun setDeviceNodeInfoBroadcastSecs(v: Int) { markDirty("device"); deviceState.value = deviceState.value.copy(nodeInfoBroadcastSecs = v) }
+    fun setDeviceDoubleTapAsButtonPress(v: Boolean) { markDirty("device"); deviceState.value = deviceState.value.copy(doubleTapAsButtonPress = v) }
+    fun setDeviceIsManaged(v: Boolean) { markDirty("device"); deviceState.value = deviceState.value.copy(isManaged = v) }
+    fun setDeviceDisableTripleClick(v: Boolean) { markDirty("device"); deviceState.value = deviceState.value.copy(disableTripleClick = v) }
 
     // --- Position ---
-    fun setPositionBroadcastSecs(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(positionBroadcastSecs = v) }
-    fun setPositionSmartEnabled(v: Boolean) { markDirty("position"); _positionState.value = _positionState.value.copy(positionBroadcastSmartEnabled = v) }
-    fun setPositionFixed(v: Boolean) { markDirty("position"); _positionState.value = _positionState.value.copy(fixedPosition = v) }
+    fun setPositionBroadcastSecs(v: Int) { markDirty("position"); positionState.value = positionState.value.copy(positionBroadcastSecs = v) }
+    fun setPositionSmartEnabled(v: Boolean) { markDirty("position"); positionState.value = positionState.value.copy(positionBroadcastSmartEnabled = v) }
+    fun setPositionFixed(v: Boolean) { markDirty("position"); positionState.value = positionState.value.copy(fixedPosition = v) }
     fun setPositionGpsEnabled(v: Boolean) {
         markDirty("position")
-        _positionState.value = _positionState.value.copy(gpsEnabled = v)
+        positionState.value = positionState.value.copy(gpsEnabled = v)
         // Disabling GPS entirely also stops the phone acting as the source.
         if (!v) stopPhoneGpsTracking()
-        else if (_positionState.value.gpsSource == GpsSource.PHONE) startPhoneGpsTracking()
+        else if (positionState.value.gpsSource == GpsSource.PHONE) startPhoneGpsTracking()
     }
 
     /**
@@ -552,94 +552,94 @@ class ConfigViewModel(
      * have obtained ACCESS_FINE_LOCATION before selecting PHONE.
      */
     fun setPositionGpsSource(source: GpsSource) {
-        _positionState.value = _positionState.value.copy(gpsSource = source)
-        if (source == GpsSource.PHONE && _positionState.value.gpsEnabled) {
+        positionState.value = positionState.value.copy(gpsSource = source)
+        if (source == GpsSource.PHONE && positionState.value.gpsEnabled) {
             startPhoneGpsTracking()
         } else {
             stopPhoneGpsTracking()
         }
     }
-    fun setPositionGpsUpdateInterval(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(gpsUpdateInterval = v) }
-    fun setPositionGpsMode(mode: String) { markDirty("position"); _positionState.value = _positionState.value.copy(gpsMode = mode) }
-    fun setPositionSmartMinDistance(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(broadcastSmartMinimumDistance = v) }
-    fun setPositionSmartMinInterval(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(broadcastSmartMinimumIntervalSecs = v) }
-    fun setPositionFixedLatitude(v: Double) { markDirty("position"); _positionState.value = _positionState.value.copy(fixedLatitude = v) }
-    fun setPositionFixedLongitude(v: Double) { markDirty("position"); _positionState.value = _positionState.value.copy(fixedLongitude = v) }
-    fun setPositionFixedAltitude(v: Int) { markDirty("position"); _positionState.value = _positionState.value.copy(fixedAltitude = v) }
+    fun setPositionGpsUpdateInterval(v: Int) { markDirty("position"); positionState.value = positionState.value.copy(gpsUpdateInterval = v) }
+    fun setPositionGpsMode(mode: String) { markDirty("position"); positionState.value = positionState.value.copy(gpsMode = mode) }
+    fun setPositionSmartMinDistance(v: Int) { markDirty("position"); positionState.value = positionState.value.copy(broadcastSmartMinimumDistance = v) }
+    fun setPositionSmartMinInterval(v: Int) { markDirty("position"); positionState.value = positionState.value.copy(broadcastSmartMinimumIntervalSecs = v) }
+    fun setPositionFixedLatitude(v: Double) { markDirty("position"); positionState.value = positionState.value.copy(fixedLatitude = v) }
+    fun setPositionFixedLongitude(v: Double) { markDirty("position"); positionState.value = positionState.value.copy(fixedLongitude = v) }
+    fun setPositionFixedAltitude(v: Int) { markDirty("position"); positionState.value = positionState.value.copy(fixedAltitude = v) }
 
     // --- Power ---
-    fun setPowerSaving(v: Boolean) { markDirty("power"); _powerState.value = _powerState.value.copy(isPowerSaving = v) }
-    fun setPowerShutdownAfterSecs(v: Int) { markDirty("power"); _powerState.value = _powerState.value.copy(onBatteryShutdownAfterSecs = v) }
-    fun setPowerAdcMultiplier(v: Float) { markDirty("power"); _powerState.value = _powerState.value.copy(adcMultiplierOverride = v) }
-    fun setPowerWaitBluetoothSecs(v: Int) { markDirty("power"); _powerState.value = _powerState.value.copy(waitBluetoothSecs = v) }
-    fun setPowerSdsSecs(v: Int) { markDirty("power"); _powerState.value = _powerState.value.copy(sdsSecs = v) }
-    fun setPowerLsSecs(v: Int) { markDirty("power"); _powerState.value = _powerState.value.copy(lsSecs = v) }
-    fun setPowerMinWakeSecs(v: Int) { markDirty("power"); _powerState.value = _powerState.value.copy(minWakeSecs = v) }
-    fun setPowerShutdownOnPowerLoss(v: Boolean) { markDirty("power"); _powerState.value = _powerState.value.copy(shutdownOnPowerLoss = v) }
+    fun setPowerSaving(v: Boolean) { markDirty("power"); powerState.value = powerState.value.copy(isPowerSaving = v) }
+    fun setPowerShutdownAfterSecs(v: Int) { markDirty("power"); powerState.value = powerState.value.copy(onBatteryShutdownAfterSecs = v) }
+    fun setPowerAdcMultiplier(v: Float) { markDirty("power"); powerState.value = powerState.value.copy(adcMultiplierOverride = v) }
+    fun setPowerWaitBluetoothSecs(v: Int) { markDirty("power"); powerState.value = powerState.value.copy(waitBluetoothSecs = v) }
+    fun setPowerSdsSecs(v: Int) { markDirty("power"); powerState.value = powerState.value.copy(sdsSecs = v) }
+    fun setPowerLsSecs(v: Int) { markDirty("power"); powerState.value = powerState.value.copy(lsSecs = v) }
+    fun setPowerMinWakeSecs(v: Int) { markDirty("power"); powerState.value = powerState.value.copy(minWakeSecs = v) }
+    fun setPowerShutdownOnPowerLoss(v: Boolean) { markDirty("power"); powerState.value = powerState.value.copy(shutdownOnPowerLoss = v) }
 
     // --- Network ---
-    fun setNetworkWifiEnabled(v: Boolean) { markDirty("network"); _networkState.value = _networkState.value.copy(wifiEnabled = v) }
-    fun setNetworkWifiSsid(v: String) { markDirty("network"); _networkState.value = _networkState.value.copy(wifiSsid = v) }
-    fun setNetworkWifiPsk(v: String) { markDirty("network"); _networkState.value = _networkState.value.copy(wifiPsk = v) }
-    fun setNetworkEthEnabled(v: Boolean) { markDirty("network"); _networkState.value = _networkState.value.copy(ethEnabled = v) }
-    fun setNetworkAddressMode(mode: String) { markDirty("network"); _networkState.value = _networkState.value.copy(addressMode = mode) }
-    fun setNetworkNtpServer(v: String) { markDirty("network"); _networkState.value = _networkState.value.copy(ntpServer = v) }
-    fun setNetworkRsyslogServer(v: String) { markDirty("network"); _networkState.value = _networkState.value.copy(rsyslogServer = v) }
+    fun setNetworkWifiEnabled(v: Boolean) { markDirty("network"); networkState.value = networkState.value.copy(wifiEnabled = v) }
+    fun setNetworkWifiSsid(v: String) { markDirty("network"); networkState.value = networkState.value.copy(wifiSsid = v) }
+    fun setNetworkWifiPsk(v: String) { markDirty("network"); networkState.value = networkState.value.copy(wifiPsk = v) }
+    fun setNetworkEthEnabled(v: Boolean) { markDirty("network"); networkState.value = networkState.value.copy(ethEnabled = v) }
+    fun setNetworkAddressMode(mode: String) { markDirty("network"); networkState.value = networkState.value.copy(addressMode = mode) }
+    fun setNetworkNtpServer(v: String) { markDirty("network"); networkState.value = networkState.value.copy(ntpServer = v) }
+    fun setNetworkRsyslogServer(v: String) { markDirty("network"); networkState.value = networkState.value.copy(rsyslogServer = v) }
 
     // --- Display ---
-    fun setDisplayScreenOnSecs(v: Int) { markDirty("display"); _displayState.value = _displayState.value.copy(screenOnSecs = v) }
-    fun setDisplayGpsFormat(v: String) { markDirty("display"); _displayState.value = _displayState.value.copy(gpsFormat = v) }
-    fun setDisplayAutoCarouselSecs(v: Int) { markDirty("display"); _displayState.value = _displayState.value.copy(autoScreenCarouselSecs = v) }
-    fun setDisplayCompassNorthTop(v: Boolean) { markDirty("display"); _displayState.value = _displayState.value.copy(compassNorthTop = v) }
-    fun setDisplayFlipScreen(v: Boolean) { markDirty("display"); _displayState.value = _displayState.value.copy(flipScreen = v) }
-    fun setDisplayUnits(v: String) { markDirty("display"); _displayState.value = _displayState.value.copy(units = v) }
-    fun setDisplayOled(v: String) { markDirty("display"); _displayState.value = _displayState.value.copy(oled = v) }
-    fun setDisplayMode(v: String) { markDirty("display"); _displayState.value = _displayState.value.copy(displaymode = v) }
-    fun setDisplayHeadingBold(v: Boolean) { markDirty("display"); _displayState.value = _displayState.value.copy(headingBold = v) }
-    fun setDisplayWakeOnTapOrMotion(v: Boolean) { markDirty("display"); _displayState.value = _displayState.value.copy(wakeOnTapOrMotion = v) }
+    fun setDisplayScreenOnSecs(v: Int) { markDirty("display"); displayState.value = displayState.value.copy(screenOnSecs = v) }
+    fun setDisplayGpsFormat(v: String) { markDirty("display"); displayState.value = displayState.value.copy(gpsFormat = v) }
+    fun setDisplayAutoCarouselSecs(v: Int) { markDirty("display"); displayState.value = displayState.value.copy(autoScreenCarouselSecs = v) }
+    fun setDisplayCompassNorthTop(v: Boolean) { markDirty("display"); displayState.value = displayState.value.copy(compassNorthTop = v) }
+    fun setDisplayFlipScreen(v: Boolean) { markDirty("display"); displayState.value = displayState.value.copy(flipScreen = v) }
+    fun setDisplayUnits(v: String) { markDirty("display"); displayState.value = displayState.value.copy(units = v) }
+    fun setDisplayOled(v: String) { markDirty("display"); displayState.value = displayState.value.copy(oled = v) }
+    fun setDisplayMode(v: String) { markDirty("display"); displayState.value = displayState.value.copy(displaymode = v) }
+    fun setDisplayHeadingBold(v: Boolean) { markDirty("display"); displayState.value = displayState.value.copy(headingBold = v) }
+    fun setDisplayWakeOnTapOrMotion(v: Boolean) { markDirty("display"); displayState.value = displayState.value.copy(wakeOnTapOrMotion = v) }
 
     // --- Bluetooth ---
-    fun setBluetoothEnabled(v: Boolean) { markDirty("bluetooth"); _bluetoothState.value = _bluetoothState.value.copy(enabled = v) }
-    fun setBluetoothMode(mode: String) { markDirty("bluetooth"); _bluetoothState.value = _bluetoothState.value.copy(mode = mode) }
-    fun setBluetoothFixedPin(v: Int) { markDirty("bluetooth"); _bluetoothState.value = _bluetoothState.value.copy(fixedPin = v) }
+    fun setBluetoothEnabled(v: Boolean) { markDirty("bluetooth"); bluetoothState.value = bluetoothState.value.copy(enabled = v) }
+    fun setBluetoothMode(mode: String) { markDirty("bluetooth"); bluetoothState.value = bluetoothState.value.copy(mode = mode) }
+    fun setBluetoothFixedPin(v: Int) { markDirty("bluetooth"); bluetoothState.value = bluetoothState.value.copy(fixedPin = v) }
 
     // --- MQTT module ---
-    fun setMqttEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(enabled = v) }
-    fun setMqttAddress(v: String) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(address = v) }
-    fun setMqttUsername(v: String) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(username = v) }
-    fun setMqttPassword(v: String) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(password = v) }
-    fun setMqttRoot(v: String) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(root = v) }
-    fun setMqttEncryptionEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(encryptionEnabled = v) }
-    fun setMqttJsonEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(jsonEnabled = v) }
-    fun setMqttTlsEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(tlsEnabled = v) }
-    fun setMqttProxyToClientEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(proxyToClientEnabled = v) }
-    fun setMqttMapReportingEnabled(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(mapReportingEnabled = v) }
-    fun setMqttMapPublishIntervalSecs(v: Int) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(mapPublishIntervalSecs = v) }
-    fun setMqttMapPositionPrecision(v: Int) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(mapPositionPrecision = v) }
-    fun setMqttMapShouldReportLocation(v: Boolean) { markDirty("mqtt"); _mqttState.value = _mqttState.value.copy(mapShouldReportLocation = v) }
+    fun setMqttEnabled(v: Boolean) { markDirty("mqtt"); mqttState.value = mqttState.value.copy(enabled = v) }
+    fun setMqttAddress(v: String) { markDirty("mqtt"); mqttState.value = mqttState.value.copy(address = v) }
+    fun setMqttUsername(v: String) { markDirty("mqtt"); mqttState.value = mqttState.value.copy(username = v) }
+    fun setMqttPassword(v: String) { markDirty("mqtt"); mqttState.value = mqttState.value.copy(password = v) }
+    fun setMqttRoot(v: String) { markDirty("mqtt"); mqttState.value = mqttState.value.copy(root = v) }
+    fun setMqttEncryptionEnabled(v: Boolean) { markDirty("mqtt"); mqttState.value = mqttState.value.copy(encryptionEnabled = v) }
+    fun setMqttJsonEnabled(v: Boolean) { markDirty("mqtt"); mqttState.value = mqttState.value.copy(jsonEnabled = v) }
+    fun setMqttTlsEnabled(v: Boolean) { markDirty("mqtt"); mqttState.value = mqttState.value.copy(tlsEnabled = v) }
+    fun setMqttProxyToClientEnabled(v: Boolean) { markDirty("mqtt"); mqttState.value = mqttState.value.copy(proxyToClientEnabled = v) }
+    fun setMqttMapReportingEnabled(v: Boolean) { markDirty("mqtt"); mqttState.value = mqttState.value.copy(mapReportingEnabled = v) }
+    fun setMqttMapPublishIntervalSecs(v: Int) { markDirty("mqtt"); mqttState.value = mqttState.value.copy(mapPublishIntervalSecs = v) }
+    fun setMqttMapPositionPrecision(v: Int) { markDirty("mqtt"); mqttState.value = mqttState.value.copy(mapPositionPrecision = v) }
+    fun setMqttMapShouldReportLocation(v: Boolean) { markDirty("mqtt"); mqttState.value = mqttState.value.copy(mapShouldReportLocation = v) }
 
     // --- Channel ---
     fun setChannelName(index: Int, name: String) {
         markDirty("channels")
-        _channelsState.value = _channelsState.value.map {
+        channelsState.value = channelsState.value.map {
             if (it.index == index) it.copy(name = name) else it
         }
     }
     fun setChannelPskHex(index: Int, hex: String) {
         markDirty("channels")
-        _channelsState.value = _channelsState.value.map {
+        channelsState.value = channelsState.value.map {
             if (it.index == index) it.copy(pskHex = hex) else it
         }
     }
     fun setChannelUplink(index: Int, v: Boolean) {
         markDirty("channels")
-        _channelsState.value = _channelsState.value.map {
+        channelsState.value = channelsState.value.map {
             if (it.index == index) it.copy(uplinkEnabled = v) else it
         }
     }
     fun setChannelDownlink(index: Int, v: Boolean) {
         markDirty("channels")
-        _channelsState.value = _channelsState.value.map {
+        channelsState.value = channelsState.value.map {
             if (it.index == index) it.copy(downlinkEnabled = v) else it
         }
     }
@@ -673,14 +673,14 @@ class ConfigViewModel(
     // ========================  APPLY METHODS  ========================
 
     fun applyOwner() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         if (meshService.owner.value == null) {
-            _configStatus.value = "Owner not yet loaded — refresh first"
+            configStatus.value = "Owner not yet loaded — refresh first"
             return
         }
-        val s = _ownerState.value
+        val s = ownerState.value
         if (s.longName.isBlank() || s.shortName.isBlank()) {
-            _configStatus.value = "Long/short name cannot be empty"
+            configStatus.value = "Long/short name cannot be empty"
             return
         }
         val user = MeshProtos.User.newBuilder()
@@ -690,24 +690,24 @@ class ConfigViewModel(
             .build()
         val ok = meshService.writeOwner(user)
         if (ok) dirty.remove("owner")
-        _configStatus.value = if (ok) "Owner config sent" else "Failed to send owner config"
+        configStatus.value = if (ok) "Owner config sent" else "Failed to send owner config"
     }
 
     fun applyLoraConfig() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         if (meshService.radioConfig.value == null) {
-            _configStatus.value = "LoRa config not yet loaded from device — refresh first"
+            configStatus.value = "LoRa config not yet loaded from device — refresh first"
             return
         }
-        val s = _loraState.value
+        val s = loraState.value
         // Refuse obviously dangerous combinations that can crash the radio task
         // on the firmware (and bootloop the device).
         if (s.region.startsWith("UNSET") || s.region.contains("unknown")) {
-            _configStatus.value = "Refusing to write: pick a real region first"
+            configStatus.value = "Refusing to write: pick a real region first"
             return
         }
         if (!s.usePreset && (s.bandwidth == 0 || s.spreadFactor == 0 || s.codingRate == 0)) {
-            _configStatus.value = "Refusing to write: bandwidth / SF / CR cannot be zero when not using a preset"
+            configStatus.value = "Refusing to write: bandwidth / SF / CR cannot be zero when not using a preset"
             return
         }
         try {
@@ -741,18 +741,18 @@ class ConfigViewModel(
             val config = MeshProtos.Config.newBuilder().setLora(lora).build()
             val ok = meshService.writeConfig(config)
             if (ok) dirty.remove("lora")
-            _configStatus.value = if (ok) "LoRa config sent" else "Failed to send LoRa config"
+            configStatus.value = if (ok) "LoRa config sent" else "Failed to send LoRa config"
         } catch (e: Exception) {
-            _configStatus.value = "Error: ${e.message}"
+            configStatus.value = "Error: ${e.message}"
         }
     }
 
     fun applyDeviceConfig() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         if (meshService.deviceConfig.value == null) {
-            _configStatus.value = "Device config not yet loaded — refresh first"; return
+            configStatus.value = "Device config not yet loaded — refresh first"; return
         }
-        val s = _deviceState.value
+        val s = deviceState.value
         val dev = MeshProtos.Config.DeviceConfig.newBuilder()
             .setRole(safeEnum(MeshProtos.Config.DeviceConfig.Role::valueOf, s.role, MeshProtos.Config.DeviceConfig.Role.CLIENT))
             .setSerialEnabled(s.serialEnabled)
@@ -768,15 +768,15 @@ class ConfigViewModel(
         val config = MeshProtos.Config.newBuilder().setDevice(dev).build()
         val ok = meshService.writeConfig(config)
         if (ok) dirty.remove("device")
-        _configStatus.value = if (ok) "Device config sent" else "Failed to send device config"
+        configStatus.value = if (ok) "Device config sent" else "Failed to send device config"
     }
 
     fun applyPositionConfig() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         if (meshService.positionConfig.value == null) {
-            _configStatus.value = "Position config not yet loaded — refresh first"; return
+            configStatus.value = "Position config not yet loaded — refresh first"; return
         }
-        val s = _positionState.value
+        val s = positionState.value
         val pos = MeshProtos.Config.PositionConfig.newBuilder()
             .setPositionBroadcastSecs(s.positionBroadcastSecs)
             .setPositionBroadcastSmartEnabled(s.positionBroadcastSmartEnabled)
@@ -790,7 +790,7 @@ class ConfigViewModel(
         val config = MeshProtos.Config.newBuilder().setPosition(pos).build()
         val ok = meshService.writeConfig(config)
         if (ok) dirty.remove("position")
-        _configStatus.value = if (ok) "Position config sent" else "Failed to send position config"
+        configStatus.value = if (ok) "Position config sent" else "Failed to send position config"
     }
 
     /**
@@ -800,10 +800,10 @@ class ConfigViewModel(
      * to use this location in subsequent broadcasts.
      */
     fun applyFixedPosition() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
-        val s = _positionState.value
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
+        val s = positionState.value
         if (!s.fixedPosition) {
-            _configStatus.value = "Enable Fixed Position first"; return
+            configStatus.value = "Enable Fixed Position first"; return
         }
         val pos = MeshProtos.Position.newBuilder()
             .setLatitudeI((s.fixedLatitude * 1e7).toInt())
@@ -811,7 +811,7 @@ class ConfigViewModel(
             .setAltitude(s.fixedAltitude)
             .build()
         val ok = meshService.setFixedPosition(pos)
-        _configStatus.value = if (ok) "Fixed position sent" else "Failed to send fixed position"
+        configStatus.value = if (ok) "Fixed position sent" else "Failed to send fixed position"
     }
 
     /**
@@ -825,15 +825,15 @@ class ConfigViewModel(
      * a "could not get phone location" status.
      */
     fun applyFixedPositionFromPhone() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         val provider = phoneLocation ?: run {
-            _configStatus.value = "Phone GPS unavailable"; return
+            configStatus.value = "Phone GPS unavailable"; return
         }
-        _configStatus.value = "Getting phone location…"
+        configStatus.value = "Getting phone location…"
         viewModelScope.launch {
             val fix = provider.currentFix()
             if (fix == null) {
-                _configStatus.value =
+                configStatus.value =
                     "Could not get phone location (enable location services / grant permission)"
                 return@launch
             }
@@ -841,7 +841,7 @@ class ConfigViewModel(
             // Reflect the phone fix in the UI and turn on fixed-position so a
             // subsequent "Apply Position Config" keeps the device using it.
             markDirty("position")
-            _positionState.value = _positionState.value.copy(
+            positionState.value = positionState.value.copy(
                 fixedPosition = true,
                 fixedLatitude = fix.latitude,
                 fixedLongitude = fix.longitude,
@@ -853,7 +853,7 @@ class ConfigViewModel(
                 .setAltitude(altitude)
                 .build()
             val ok = meshService.setFixedPosition(pos)
-            _configStatus.value = if (ok) {
+            configStatus.value = if (ok) {
                 "Fixed position set from phone GPS"
             } else {
                 "Failed to send phone position"
@@ -865,9 +865,9 @@ class ConfigViewModel(
     fun onPhoneGpsPermissionDenied() {
         // Selecting "Phone GPS" never took effect, so make sure the source
         // shows as Device and tracking is stopped.
-        _positionState.value = _positionState.value.copy(gpsSource = GpsSource.DEVICE)
+        positionState.value = positionState.value.copy(gpsSource = GpsSource.DEVICE)
         stopPhoneGpsTracking()
-        _configStatus.value = "Location permission denied — can't use phone GPS"
+        configStatus.value = "Location permission denied — can't use phone GPS"
     }
 
     /** Active phone-GPS streaming job, non-null while PHONE source is on. */
@@ -880,12 +880,12 @@ class ConfigViewModel(
      */
     private fun startPhoneGpsTracking() {
         val provider = phoneLocation ?: run {
-            _configStatus.value = "Phone GPS unavailable"; return
+            configStatus.value = "Phone GPS unavailable"; return
         }
         if (phoneGpsJob?.isActive == true) return
-        val secs = _positionState.value.positionBroadcastSecs.takeIf { it > 0 } ?: 30
+        val secs = positionState.value.positionBroadcastSecs.takeIf { it > 0 } ?: 30
         val intervalMs = secs.toLong() * 1000L
-        _configStatus.value = "Phone GPS active — broadcasting this phone's location"
+        configStatus.value = "Phone GPS active — broadcasting this phone's location"
         phoneGpsJob = viewModelScope.launch {
             provider.locationUpdates(intervalMs).collect { loc ->
                 if (!meshService.isConnected) return@collect
@@ -912,9 +912,9 @@ class ConfigViewModel(
 
     /** Tell the device to forget any previously-set fixed position. */
     fun clearFixedPosition() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         val ok = meshService.removeFixedPosition()
-        _configStatus.value = if (ok) "Fixed position cleared" else "Failed to clear fixed position"
+        configStatus.value = if (ok) "Fixed position cleared" else "Failed to clear fixed position"
     }
 
     /**
@@ -924,23 +924,23 @@ class ConfigViewModel(
      * local radio without emitting a mesh packet.
      */
     fun broadcastPosition() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
-        val s = _positionState.value
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
+        val s = positionState.value
         val pos = MeshProtos.Position.newBuilder()
             .setLatitudeI((s.fixedLatitude * 1e7).toInt())
             .setLongitudeI((s.fixedLongitude * 1e7).toInt())
             .setAltitude(s.fixedAltitude)
             .build()
         val ok = meshService.broadcastPosition(pos, channel = 0, dest = null)
-        _configStatus.value = if (ok) "Position broadcast sent" else "Failed to broadcast position"
+        configStatus.value = if (ok) "Position broadcast sent" else "Failed to broadcast position"
     }
 
     fun applyPowerConfig() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         if (meshService.powerConfig.value == null) {
-            _configStatus.value = "Power config not yet loaded — refresh first"; return
+            configStatus.value = "Power config not yet loaded — refresh first"; return
         }
-        val s = _powerState.value
+        val s = powerState.value
         val pwr = MeshProtos.Config.PowerConfig.newBuilder()
             .setIsPowerSaving(s.isPowerSaving)
             .setOnBatteryShutdownAfterSecs(s.onBatteryShutdownAfterSecs)
@@ -954,15 +954,15 @@ class ConfigViewModel(
         val config = MeshProtos.Config.newBuilder().setPower(pwr).build()
         val ok = meshService.writeConfig(config)
         if (ok) dirty.remove("power")
-        _configStatus.value = if (ok) "Power config sent" else "Failed to send power config"
+        configStatus.value = if (ok) "Power config sent" else "Failed to send power config"
     }
 
     fun applyNetworkConfig() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         if (meshService.networkConfig.value == null) {
-            _configStatus.value = "Network config not yet loaded — refresh first"; return
+            configStatus.value = "Network config not yet loaded — refresh first"; return
         }
-        val s = _networkState.value
+        val s = networkState.value
         val net = MeshProtos.Config.NetworkConfig.newBuilder()
             .setWifiEnabled(s.wifiEnabled)
             .setWifiSsid(s.wifiSsid)
@@ -975,15 +975,15 @@ class ConfigViewModel(
         val config = MeshProtos.Config.newBuilder().setNetwork(net).build()
         val ok = meshService.writeConfig(config)
         if (ok) dirty.remove("network")
-        _configStatus.value = if (ok) "Network config sent" else "Failed to send network config"
+        configStatus.value = if (ok) "Network config sent" else "Failed to send network config"
     }
 
     fun applyDisplayConfig() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         if (meshService.displayConfig.value == null) {
-            _configStatus.value = "Display config not yet loaded — refresh first"; return
+            configStatus.value = "Display config not yet loaded — refresh first"; return
         }
-        val s = _displayState.value
+        val s = displayState.value
         val dsp = MeshProtos.Config.DisplayConfig.newBuilder()
             .setScreenOnSecs(s.screenOnSecs)
             .setGpsFormat(safeEnum(MeshProtos.Config.DisplayConfig.GpsCoordinateFormat::valueOf, s.gpsFormat, MeshProtos.Config.DisplayConfig.GpsCoordinateFormat.DEC))
@@ -999,15 +999,15 @@ class ConfigViewModel(
         val config = MeshProtos.Config.newBuilder().setDisplay(dsp).build()
         val ok = meshService.writeConfig(config)
         if (ok) dirty.remove("display")
-        _configStatus.value = if (ok) "Display config sent" else "Failed to send display config"
+        configStatus.value = if (ok) "Display config sent" else "Failed to send display config"
     }
 
     fun applyBluetoothConfig() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         if (meshService.bluetoothConfig.value == null) {
-            _configStatus.value = "Bluetooth config not yet loaded — refresh first"; return
+            configStatus.value = "Bluetooth config not yet loaded — refresh first"; return
         }
-        val s = _bluetoothState.value
+        val s = bluetoothState.value
         val bt = MeshProtos.Config.BluetoothConfig.newBuilder()
             .setEnabled(s.enabled)
             .setMode(safeEnum(MeshProtos.Config.BluetoothConfig.PairingMode::valueOf, s.mode, MeshProtos.Config.BluetoothConfig.PairingMode.RANDOM_PIN))
@@ -1016,15 +1016,15 @@ class ConfigViewModel(
         val config = MeshProtos.Config.newBuilder().setBluetooth(bt).build()
         val ok = meshService.writeConfig(config)
         if (ok) dirty.remove("bluetooth")
-        _configStatus.value = if (ok) "Bluetooth config sent" else "Failed to send bluetooth config"
+        configStatus.value = if (ok) "Bluetooth config sent" else "Failed to send bluetooth config"
     }
 
     fun applyMqttConfig() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         if (meshService.mqttConfig.value == null) {
-            _configStatus.value = "MQTT config not yet loaded — refresh first"; return
+            configStatus.value = "MQTT config not yet loaded — refresh first"; return
         }
-        val s = _mqttState.value
+        val s = mqttState.value
         val mqttBuilder = MeshProtos.ModuleConfig.MQTTConfig.newBuilder()
             .setEnabled(s.enabled)
             .setAddress(s.address)
@@ -1046,22 +1046,22 @@ class ConfigViewModel(
         val mc = MeshProtos.ModuleConfig.newBuilder().setMqtt(mqttBuilder).build()
         val ok = meshService.writeModuleConfig(mc)
         if (ok) dirty.remove("mqtt")
-        _configStatus.value = if (ok) "MQTT module config sent" else "Failed to send MQTT module config"
+        configStatus.value = if (ok) "MQTT module config sent" else "Failed to send MQTT module config"
     }
 
     fun applyChannel(index: Int) {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         if (meshService.channels.value.isEmpty()) {
-            _configStatus.value = "Channels not yet loaded — refresh first"; return
+            configStatus.value = "Channels not yet loaded — refresh first"; return
         }
-        val chUi = _channelsState.value.find { it.index == index } ?: return
+        val chUi = channelsState.value.find { it.index == index } ?: return
         val pskBytes = try {
             chUi.pskHex.hexToBytes()
         } catch (e: IllegalArgumentException) {
             // Surface malformed PSK to the user instead of crashing the
             // apply path. Don't clear the dirty flag — the user's edit
             // is still pending until they fix the field.
-            _configStatus.value = "Channel $index PSK invalid: ${e.message}"
+            configStatus.value = "Channel $index PSK invalid: ${e.message}"
             return
         }
         val settings = MeshProtos.ChannelSettings.newBuilder()
@@ -1077,15 +1077,15 @@ class ConfigViewModel(
             .build()
         val ok = meshService.writeChannel(channel)
         if (ok) dirty.remove("channels")
-        _configStatus.value = if (ok) "Channel $index config sent" else "Failed to send channel config"
+        configStatus.value = if (ok) "Channel $index config sent" else "Failed to send channel config"
     }
 
     // ========================  ACTIONS  ========================
 
     fun refreshDeviceConfig() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         clearDirty()
-        _configStatus.value = "Config refresh requested…"
+        configStatus.value = "Config refresh requested…"
         viewModelScope.launch {
             // Snapshot the LoRa config reference so we can detect *any* refresh
             // activity (a new emission with the same value or a new instance).
@@ -1108,7 +1108,7 @@ class ConfigViewModel(
             // Timed out. Decide whether *anything* arrived in the meantime.
             syncFromServiceFlows()
             val after = meshService.radioConfig.value
-            _configStatus.value = when {
+            configStatus.value = when {
                 after != null && after !== before -> "Refresh partial — no end-of-config marker (using what we got)"
                 after != null -> "Refresh timed out — UI shows last known values"
                 else -> "Refresh timed out — no response from device"
@@ -1117,29 +1117,29 @@ class ConfigViewModel(
     }
 
     fun rebootDevice() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         meshService.rebootDevice(5)
-        _configStatus.value = "Reboot command sent (5s)"
+        configStatus.value = "Reboot command sent (5s)"
     }
 
     fun factoryReset() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         meshService.factoryReset()
-        _configStatus.value = "Factory reset command sent"
+        configStatus.value = "Factory reset command sent"
     }
 
     fun resetNodeDb() {
-        if (!meshService.isConnected) { _configStatus.value = "Not connected"; return }
+        if (!meshService.isConnected) { configStatus.value = "Not connected"; return }
         if (!meshService.resetNodeDb()) {
-            _configStatus.value = "Reset NodeDB failed to send"
+            configStatus.value = "Reset NodeDB failed to send"
             return
         }
         // `resetNodeDb()` now wraps reset-plus-refresh in the bridge, so
         // we don't need a separate `refreshConfig()` call here.
-        _configStatus.value = "Reset NodeDB sent — refreshing…"
+        configStatus.value = "Reset NodeDB sent — refreshing…"
     }
 
-    fun clearStatus() { _configStatus.value = null }
+    fun clearStatus() { configStatus.value = null }
 
     /** Live in-app event log, surfaced on the Debug settings card. */
     val debugLog: StateFlow<List<re.chasam.voicetastic.service.DebugEntry>> =
@@ -1159,7 +1159,7 @@ class ConfigViewModel(
      * Accepts optional `0x` prefix and embedded whitespace. Throws
      * [IllegalArgumentException] with a user-readable message on
      * malformed input — callers (currently [applyChannel]) catch this
-     * and surface it via [_configStatus] instead of letting a
+     * and surface it via [configStatus] instead of letting a
      * `NumberFormatException` propagate and crash the apply path.
      */
     private fun String.hexToBytes(): ByteArray {
