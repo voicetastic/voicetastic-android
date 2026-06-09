@@ -159,11 +159,11 @@ class MessagingViewModel(
             if (withItem.size > MAX_CHAT_ITEMS) withItem.takeLast(MAX_CHAT_ITEMS) else withItem
     }
 
-    private val _selectedNode = MutableStateFlow<MeshNode?>(null)
-    val selectedNode: StateFlow<MeshNode?> = _selectedNode.asStateFlow()
+    val selectedNode: StateFlow<MeshNode?>
+        field = MutableStateFlow<MeshNode?>(null)
 
-    private val _selectedChannel = MutableStateFlow(0)
-    val selectedChannel: StateFlow<Int> = _selectedChannel.asStateFlow()
+    val selectedChannel: StateFlow<Int>
+        field = MutableStateFlow(0)
 
     /**
      * Filtered chat items for the currently-selected conversation.
@@ -174,8 +174,8 @@ class MessagingViewModel(
      */
     val chatItems: StateFlow<List<ChatItem>> = combine(
         _allChatItems,
-        _selectedNode,
-        _selectedChannel
+        selectedNode,
+        selectedChannel
     ) { items, node, channel ->
         val conversationKey = node?.nodeId ?: "broadcast"
         items.filter { it.channel == channel && it.contactKey == conversationKey }
@@ -234,8 +234,8 @@ class MessagingViewModel(
         MutableSharedFlow<VoiceMessageOut>(extraBufferCapacity = 16)
     val completedVoiceMessages = _completedVoiceMessages.asSharedFlow()
 
-    private val _isRecording = MutableStateFlow(false)
-    val isRecording: StateFlow<Boolean> = _isRecording.asStateFlow()
+    val isRecording: StateFlow<Boolean>
+        field = MutableStateFlow(false)
 
     /**
      * Captured-clip-awaiting-confirmation file, when the user stopped a
@@ -243,20 +243,20 @@ class MessagingViewModel(
      * The UI's voice composer switches into Preview mode (Listen / Delete /
      * Send) when this is non-null, mirroring desktop's `VoiceCompose::Preview`.
      */
-    private val _previewFile = MutableStateFlow<File?>(null)
-    val previewFile: StateFlow<File?> = _previewFile.asStateFlow()
+    val previewFile: StateFlow<File?>
+        field = MutableStateFlow<File?>(null)
 
-    private val _isPreviewPlaying = MutableStateFlow(false)
-    val isPreviewPlaying: StateFlow<Boolean> = _isPreviewPlaying.asStateFlow()
+    val isPreviewPlaying: StateFlow<Boolean>
+        field = MutableStateFlow(false)
 
-    private val _isPlaying = MutableStateFlow(false)
-    val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
+    val isPlaying: StateFlow<Boolean>
+        field = MutableStateFlow(false)
 
-    private val _playingItemId = MutableStateFlow<Int?>(null)
-    val playingItemId: StateFlow<Int?> = _playingItemId.asStateFlow()
+    val playingItemId: StateFlow<Int?>
+        field = MutableStateFlow<Int?>(null)
 
-    private val _sendingProgress = MutableStateFlow<VoiceTransferProgress?>(null)
-    val sendingProgress: StateFlow<VoiceTransferProgress?> = _sendingProgress.asStateFlow()
+    val sendingProgress: StateFlow<VoiceTransferProgress?>
+        field = MutableStateFlow<VoiceTransferProgress?>(null)
 
     /**
      * In-flight inbound voice messages, keyed by `messageId`. Populated as
@@ -264,8 +264,8 @@ class MessagingViewModel(
      * completes, is rejected, or its UI bubble takes over (the bubble
      * itself shows received/total chunks on its own).
      */
-    private val _incomingProgress = MutableStateFlow<Map<UInt, VoiceReceiveProgress>>(emptyMap())
-    val incomingProgress: StateFlow<Map<UInt, VoiceReceiveProgress>> = _incomingProgress.asStateFlow()
+    val incomingProgress: StateFlow<Map<UInt, VoiceReceiveProgress>>
+        field = MutableStateFlow<Map<UInt, VoiceReceiveProgress>>(emptyMap())
 
     val config: StateFlow<VoiceConfig> = voiceConfig.asStateFlow()
 
@@ -281,8 +281,8 @@ class MessagingViewModel(
         startTickLoop()
 
         player.onCompletion = {
-            _isPlaying.value = false
-            _playingItemId.value = null
+            isPlaying.value = false
+            playingItemId.value = null
         }
     }
 
@@ -313,8 +313,8 @@ class MessagingViewModel(
             meshService.incomingTextMessages.collect { incoming ->
                 val contactKey = computeContactKey(incoming.from, incoming.to, isOutgoing = false)
                 val myId = meshService.myNodeId.value
-                val selected = _selectedNode.value?.nodeId
-                val selectedChan = _selectedChannel.value
+                val selected = selectedNode.value?.nodeId
+                val selectedChan = selectedChannel.value
                 val willShow = incoming.channel == selectedChan &&
                     contactKey == (selected ?: "broadcast")
                 Log.d(
@@ -359,7 +359,7 @@ class MessagingViewModel(
                 }
                 when (event) {
                     is AssemblyEvent.Complete -> {
-                        _incomingProgress.value = _incomingProgress.value - event.message.messageId
+                        incomingProgress.value = incomingProgress.value - event.message.messageId
                         _completedVoiceMessages.tryEmit(event.message)
                     }
                     is AssemblyEvent.Rejected -> Log.d(TAG, "voice frame rejected: ${event.message}")
@@ -374,7 +374,7 @@ class MessagingViewModel(
                         // exactly what the completed `ChatItem.Voice` will use,
                         // so the filter holds end-to-end.
                         val contactKey = computeContactKey(data.from, data.to, isOutgoing = false)
-                        _incomingProgress.value = _incomingProgress.value + (event.messageId to VoiceReceiveProgress(
+                        incomingProgress.value = incomingProgress.value + (event.messageId to VoiceReceiveProgress(
                             messageId = event.messageId,
                             from = event.from,
                             received = event.receivedData.toInt(),
@@ -418,7 +418,7 @@ class MessagingViewModel(
                     continue
                 }
                 for (msg in out.finalized) {
-                    _incomingProgress.value = _incomingProgress.value - msg.messageId
+                    incomingProgress.value = incomingProgress.value - msg.messageId
                     _completedVoiceMessages.tryEmit(msg)
                 }
                 for (nack in out.nacks) {
@@ -468,8 +468,8 @@ class MessagingViewModel(
     fun sendMessage(text: String) {
         if (text.isBlank()) return
 
-        val destination = _selectedNode.value?.nodeId
-        val channel = _selectedChannel.value
+        val destination = selectedNode.value?.nodeId
+        val channel = selectedChannel.value
         // `sendTextTracked` returns the mesh packet id so the bubble can
         // be correlated with the eventual ack/nak from `ackEvents`.
         val packetId = meshService.sendTextTracked(text, destination, channel)
@@ -503,11 +503,11 @@ class MessagingViewModel(
      * Start recording a voice message.
      */
     fun startRecording() {
-        if (_isRecording.value) return
+        if (isRecording.value) return
 
         currentRecordingFile = recorder.startRecording(voiceConfig.value)
         if (currentRecordingFile != null) {
-            _isRecording.value = true
+            isRecording.value = true
         }
     }
 
@@ -518,10 +518,10 @@ class MessagingViewModel(
      * confirm before transmitting.
      */
     fun stopRecordingAndSend() {
-        if (!_isRecording.value) return
+        if (!isRecording.value) return
 
         val file = recorder.stopRecording()
-        _isRecording.value = false
+        isRecording.value = false
 
         if (file != null && file.exists() && file.length() > 0) {
             viewModelScope.launch(Dispatchers.IO) {
@@ -537,11 +537,11 @@ class MessagingViewModel(
      * state machine.
      */
     fun stopRecordingToPreview() {
-        if (!_isRecording.value) return
+        if (!isRecording.value) return
         val file = recorder.stopRecording()
-        _isRecording.value = false
+        isRecording.value = false
         if (file != null && file.exists() && file.length() > 0) {
-            _previewFile.value = file
+            previewFile.value = file
         } else {
             // Recording was empty or vanished; just go back to Idle.
             currentRecordingFile = null
@@ -555,8 +555,8 @@ class MessagingViewModel(
      * codec.
      */
     fun playPreview() {
-        val file = _previewFile.value ?: return
-        if (_isPreviewPlaying.value) return
+        val file = previewFile.value ?: return
+        if (isPreviewPlaying.value) return
         viewModelScope.launch(Dispatchers.IO) {
             val bytes = runCatching { file.readBytes() }.getOrNull() ?: return@launch
             val cfg = voiceConfig.value
@@ -565,37 +565,37 @@ class MessagingViewModel(
                 VoiceCodecChoice.Opus -> VoiceCodec.Opus to cfg.opusBitrateKbps
                 VoiceCodecChoice.Codec2 -> VoiceCodec.Codec2 to cfg.codec2Mode.ordinal
             }
-            withContext(Dispatchers.Main) { _isPreviewPlaying.value = true }
+            withContext(Dispatchers.Main) { isPreviewPlaying.value = true }
             try {
                 player.play(bytes, context.cacheDir, codec, param)
             } catch (e: Exception) {
                 Log.e(TAG, "playPreview failed", e)
             } finally {
-                withContext(Dispatchers.Main) { _isPreviewPlaying.value = false }
+                withContext(Dispatchers.Main) { isPreviewPlaying.value = false }
             }
         }
     }
 
     /** Interrupt the preview-clip playback (no-op if not playing). */
     fun stopPreviewPlayback() {
-        if (!_isPreviewPlaying.value) return
+        if (!isPreviewPlaying.value) return
         player.stop()
-        _isPreviewPlaying.value = false
+        isPreviewPlaying.value = false
     }
 
     /** Drop the previewed clip without sending; returns to Idle. */
     fun discardPreview() {
         stopPreviewPlayback()
-        _previewFile.value?.delete()
-        _previewFile.value = null
+        previewFile.value?.delete()
+        previewFile.value = null
         currentRecordingFile = null
     }
 
     /** Send the previewed clip; returns to Idle once dispatched. */
     fun sendPreview() {
-        val file = _previewFile.value ?: return
+        val file = previewFile.value ?: return
         stopPreviewPlayback()
-        _previewFile.value = null
+        previewFile.value = null
         currentRecordingFile = null
         if (file.exists() && file.length() > 0) {
             viewModelScope.launch(Dispatchers.IO) { sendVoiceFile(file) }
@@ -607,7 +607,7 @@ class MessagingViewModel(
      */
     fun cancelRecording() {
         recorder.stopRecording()
-        _isRecording.value = false
+        isRecording.value = false
         currentRecordingFile?.delete()
         currentRecordingFile = null
     }
@@ -623,8 +623,8 @@ class MessagingViewModel(
             VoiceCodecChoice.Codec2 -> VoiceCodec.Codec2 to cfg.codec2Mode.ordinal.toUByte()
         }
 
-        val destination = _selectedNode.value?.nodeId
-        val channel = _selectedChannel.value
+        val destination = selectedNode.value?.nodeId
+        val channel = selectedChannel.value
         // contactKey for the conversation this send belongs to — matches
         // the key the outgoing ChatItem.Voice gets below, so the progress
         // banner only shows in that conversation.
@@ -649,7 +649,7 @@ class MessagingViewModel(
                         // progress banner at 0 / total so it shows up the
                         // instant we start, even before the first packet
                         // leaves the radio.
-                        _sendingProgress.value = VoiceTransferProgress(
+                        sendingProgress.value = VoiceTransferProgress(
                             sent = 0,
                             total = status.totalData.toInt() + status.parityCount.toInt(),
                             contactKey = sendContactKey,
@@ -657,7 +657,7 @@ class MessagingViewModel(
                         )
                     }
                     is SendStatus.Sending -> {
-                        _sendingProgress.value = VoiceTransferProgress(
+                        sendingProgress.value = VoiceTransferProgress(
                             sent = status.sent.toInt(),
                             total = status.total.toInt(),
                             contactKey = sendContactKey,
@@ -676,7 +676,7 @@ class MessagingViewModel(
                         if (status is SendStatus.Failed) {
                             Log.w(TAG, "voice send failed: ${status.message}")
                         }
-                        _sendingProgress.value = null
+                        sendingProgress.value = null
                     }
                     is SendStatus.BurstComplete -> {
                         // Initial burst is on the air; we may still get
@@ -705,7 +705,7 @@ class MessagingViewModel(
             sender.send(req, listener)
         } catch (t: Throwable) {
             Log.e(TAG, "VoiceSender.send failed", t)
-            _sendingProgress.value = null
+            sendingProgress.value = null
             file.delete()
             return
         }
@@ -745,15 +745,15 @@ class MessagingViewModel(
      * Play a voice message.
      */
     fun playVoiceMessage(item: ChatItem.Voice) {
-        if (_isPlaying.value && _playingItemId.value == item.id) {
+        if (isPlaying.value && playingItemId.value == item.id) {
             player.stop()
-            _isPlaying.value = false
-            _playingItemId.value = null
+            isPlaying.value = false
+            playingItemId.value = null
             return
         }
 
-        _isPlaying.value = true
-        _playingItemId.value = item.id
+        isPlaying.value = true
+        playingItemId.value = item.id
         player.play(item.audioData, context.cacheDir, item.codec, item.bitrateIndex)
     }
 
@@ -762,8 +762,8 @@ class MessagingViewModel(
      */
     fun stopPlayback() {
         player.stop()
-        _isPlaying.value = false
-        _playingItemId.value = null
+        isPlaying.value = false
+        playingItemId.value = null
     }
 
     // ========== COMMON ==========
@@ -772,14 +772,14 @@ class MessagingViewModel(
      * Select a node to send messages to. Null = broadcast mode.
      */
     fun selectNode(node: MeshNode?) {
-        _selectedNode.value = node
+        selectedNode.value = node
     }
 
     /**
      * Select the channel index for sending and filtering messages.
      */
     fun selectChannel(channel: Int) {
-        _selectedChannel.value = channel
+        selectedChannel.value = channel
     }
 
     /**

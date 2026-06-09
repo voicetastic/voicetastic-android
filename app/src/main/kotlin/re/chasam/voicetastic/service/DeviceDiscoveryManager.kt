@@ -17,7 +17,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
@@ -30,11 +29,11 @@ class DeviceDiscoveryManager(private val context: Context) {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
-    private val _discoveredBleDevices = MutableStateFlow<List<BluetoothDevice>>(emptyList())
-    val discoveredBleDevices: StateFlow<List<BluetoothDevice>> = _discoveredBleDevices.asStateFlow()
+    val discoveredBleDevices: StateFlow<List<BluetoothDevice>>
+        field = MutableStateFlow<List<BluetoothDevice>>(emptyList())
 
-    private val _isScanning = MutableStateFlow(false)
-    val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
+    val isScanning: StateFlow<Boolean>
+        field = MutableStateFlow(false)
 
     private var scanTimeoutJob: Job? = null
 
@@ -44,16 +43,16 @@ class DeviceDiscoveryManager(private val context: Context) {
         @SuppressLint("MissingPermission")
         override fun onScanResult(callbackType: Int, result: ScanResult) {
             val device = result.device ?: return
-            val current = _discoveredBleDevices.value
+            val current = discoveredBleDevices.value
             if (current.none { it.address == device.address }) {
-                _discoveredBleDevices.value = current + device
+                discoveredBleDevices.value = current + device
                 Log.i(TAG, "Found Meshtastic device: ${device.name ?: device.address}")
             }
         }
 
         override fun onScanFailed(errorCode: Int) {
             Log.e(TAG, "BLE scan failed: $errorCode")
-            _isScanning.value = false
+            isScanning.value = false
         }
     }
 
@@ -84,12 +83,12 @@ class DeviceDiscoveryManager(private val context: Context) {
             Log.w(TAG, "startBleScan: bluetoothLeScanner unavailable")
             return
         }
-        if (_isScanning.value) {
+        if (isScanning.value) {
             Log.d(TAG, "startBleScan: already scanning")
             return
         }
-        _discoveredBleDevices.value = emptyList()
-        _isScanning.value = true
+        discoveredBleDevices.value = emptyList()
+        isScanning.value = true
 
         val filter = android.bluetooth.le.ScanFilter.Builder()
             .setServiceUuid(android.os.ParcelUuid(MeshtasticBle.SERVICE_UUID))
@@ -103,7 +102,7 @@ class DeviceDiscoveryManager(private val context: Context) {
             Log.i(TAG, "BLE scan started")
         } catch (e: Exception) {
             Log.e(TAG, "BLE scan failed to start", e)
-            _isScanning.value = false
+            isScanning.value = false
             return
         }
 
@@ -117,7 +116,7 @@ class DeviceDiscoveryManager(private val context: Context) {
 
     @SuppressLint("MissingPermission")
     fun stopBleScan() {
-        if (!_isScanning.value) return
+        if (!isScanning.value) return
         scanTimeoutJob?.cancel()
         scanTimeoutJob = null
         try {
@@ -125,7 +124,7 @@ class DeviceDiscoveryManager(private val context: Context) {
         } catch (e: Exception) {
             Log.w(TAG, "stopBleScan threw", e)
         }
-        _isScanning.value = false
+        isScanning.value = false
         Log.i(TAG, "BLE scan stopped")
     }
 

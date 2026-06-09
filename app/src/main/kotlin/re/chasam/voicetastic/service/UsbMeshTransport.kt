@@ -25,8 +25,6 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
-import kotlinx.coroutines.flow.asStateFlow
 
 /**
  * USB serial transport for talking to a Meshtastic node.
@@ -92,19 +90,19 @@ class UsbMeshTransport(private val context: Context) {
     private var ioJob: Job? = null
     private var permissionReceiver: BroadcastReceiver? = null
 
-    private val _state = MutableStateFlow(State.DISCONNECTED)
-    val state: StateFlow<State> = _state.asStateFlow()
+    val state: StateFlow<State>
+        field = MutableStateFlow(State.DISCONNECTED)
 
-    private val _connectedDevice = MutableStateFlow<UsbDevice?>(null)
-    val connectedDevice: StateFlow<UsbDevice?> = _connectedDevice.asStateFlow()
+    val connectedDevice: StateFlow<UsbDevice?>
+        field = MutableStateFlow<UsbDevice?>(null)
 
-    private val _incomingFromRadio = MutableSharedFlow<ByteArray>(extraBufferCapacity = 64)
-    val incomingFromRadio: SharedFlow<ByteArray> = _incomingFromRadio.asSharedFlow()
+    val incomingFromRadio: SharedFlow<ByteArray>
+        field = MutableSharedFlow<ByteArray>(extraBufferCapacity = 64)
 
-    private val _errors = MutableSharedFlow<String>(extraBufferCapacity = 8)
-    val errors: SharedFlow<String> = _errors.asSharedFlow()
+    val errors: SharedFlow<String>
+        field = MutableSharedFlow<String>(extraBufferCapacity = 8)
 
-    val isConnected: Boolean get() = _state.value == State.CONNECTED
+    val isConnected: Boolean get() = state.value == State.CONNECTED
 
     // ===== Discovery & permissions =====
 
@@ -155,15 +153,15 @@ class UsbMeshTransport(private val context: Context) {
 
     /** @return true on success. The driver must already have been granted permission. */
     fun connect(driver: UsbSerialDriver): Boolean {
-        if (_state.value == State.CONNECTED || _state.value == State.CONNECTING) {
-            Log.w(TAG, "connect called while state=${_state.value}; ignoring")
+        if (state.value == State.CONNECTED || state.value == State.CONNECTING) {
+            Log.w(TAG, "connect called while state=${state.value}; ignoring")
             return false
         }
-        _state.value = State.CONNECTING
+        state.value = State.CONNECTING
         return try {
             val connection = usbManager.openDevice(driver.device) ?: run {
                 emitError("Cannot open USB device (permission denied?)")
-                _state.value = State.ERROR
+                state.value = State.ERROR
                 return false
             }
             val serialPort = driver.ports.first()
@@ -196,8 +194,8 @@ class UsbMeshTransport(private val context: Context) {
             // mode so the very next ToRadio (typically `want_config_id`)
             // is actually processed instead of being treated as raw input.
             wakeFirmware(serialPort)
-            _connectedDevice.value = driver.device
-            _state.value = State.CONNECTED
+            connectedDevice.value = driver.device
+            state.value = State.CONNECTED
             Log.i(TAG, "Connected to USB device ${driver.device.deviceName}")
             // Wake the firmware: ask for full config.
             true
@@ -205,7 +203,7 @@ class UsbMeshTransport(private val context: Context) {
             Log.e(TAG, "USB connect failed", e)
             emitError("USB connect failed: ${e.message}")
             disconnect()
-            _state.value = State.ERROR
+            state.value = State.ERROR
             false
         }
     }
@@ -216,7 +214,7 @@ class UsbMeshTransport(private val context: Context) {
                 try {
                     val payloads = parser.feed(data)
                     if (payloads.isNotEmpty()) {
-                        for (p in payloads) _incomingFromRadio.tryEmit(p)
+                        for (p in payloads) incomingFromRadio.tryEmit(p)
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Framing error", e)
@@ -291,8 +289,8 @@ class UsbMeshTransport(private val context: Context) {
             try { context.unregisterReceiver(it) } catch (_: Exception) {}
             permissionReceiver = null
         }
-        _connectedDevice.value = null
-        if (_state.value != State.ERROR) _state.value = State.DISCONNECTED
+        connectedDevice.value = null
+        if (state.value != State.ERROR) state.value = State.DISCONNECTED
         parser.reset()
     }
 
@@ -303,14 +301,14 @@ class UsbMeshTransport(private val context: Context) {
 
     /** Public hook so MeshServiceManager can drop USB when the device is detached. */
     fun onDeviceDetached(device: UsbDevice) {
-        if (_connectedDevice.value?.deviceName == device.deviceName) {
+        if (connectedDevice.value?.deviceName == device.deviceName) {
             Log.i(TAG, "Active USB device detached → disconnecting")
             disconnect()
         }
     }
 
     private fun emitError(msg: String) {
-        _errors.tryEmit(msg)
+        errors.tryEmit(msg)
     }
 
     // For tests: expose a hook to drive a heartbeat loop if we add one later.
