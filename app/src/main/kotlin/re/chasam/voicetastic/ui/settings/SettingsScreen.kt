@@ -635,8 +635,10 @@ fun SettingsScreen(
                 Slider(
                     value = voiceConfig.chunkTimeoutSeconds.toFloat(),
                     onValueChange = { viewModel.setChunkTimeout(it.toInt()) },
-                    valueRange = 5f..120f,
-                    steps = 22
+                    // Range mirrors core's reassembly-timeout bounds (10..3600s).
+                    // Must cover a full clip's airtime + NACK recovery on slow
+                    // presets; the old 5..120s range gave up mid-transfer.
+                    valueRange = 10f..3600f
                 )
                 SwitchSetting("Partial Play on Timeout", voiceConfig.partialPlayOnTimeout) { viewModel.setPartialPlayOnTimeout(it) }
                 SwitchSetting(
