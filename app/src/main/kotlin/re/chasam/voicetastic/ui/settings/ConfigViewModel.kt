@@ -661,7 +661,8 @@ class ConfigViewModel(
         voiceConfig.value = voiceConfig.value.copy(maxDurationSeconds = seconds.coerceIn(1, 60))
     }
     fun setChunkTimeout(seconds: Int) {
-        voiceConfig.value = voiceConfig.value.copy(chunkTimeoutSeconds = seconds.coerceIn(5, 120))
+        // Bounds mirror core's REASSEMBLY_TIMEOUT_LOWER/UPPER_SECS (10..3600).
+        voiceConfig.value = voiceConfig.value.copy(chunkTimeoutSeconds = seconds.coerceIn(10, 3600))
     }
     fun setPartialPlayOnTimeout(enabled: Boolean) {
         voiceConfig.value = voiceConfig.value.copy(partialPlayOnTimeout = enabled)

@@ -107,8 +107,16 @@ class MessagingViewModel(
         /** Per-message completion memory before duplicates are forgotten. */
         private const val COMPLETION_MEMORY_MS: ULong = 600_000uL
 
-        /** Hard cap on NACK rounds per message. Mirrors `NACK_MAX_ROUNDS`. */
-        private const val MAX_NACK_ROUNDS: UShort = 32u
+        /**
+         * Fallback hard cap on NACK rounds per message. Mirrors core's
+         * `NACK_MAX_ROUNDS` (400). The Rust bridge re-derives the effective
+         * cap from `messageTimeoutMs / nackWindowMs` via
+         * `sync_nack_cap_to_timeout()`, so this value is normally overridden;
+         * it just guards against a degenerate config. (The previous `32`
+         * tripped well before the timeout and forced spurious
+         * "partial: N/M chunks" finalizes.)
+         */
+        private const val MAX_NACK_ROUNDS: UShort = 400u
 
         /**
          * Per-chunk audio body size on the wire, in bytes. Caps the

@@ -20,12 +20,17 @@ enum class VoiceCodecChoice {
  * @param noiseSuppressionEnabled Use AudioSource.VOICE_COMMUNICATION + NoiseSuppressor / AGC during recording. Disable for raw mic capture.
  */
 data class VoiceConfig(
-    val codec: VoiceCodecChoice = VoiceCodecChoice.AmrNb,
+    val codec: VoiceCodecChoice = VoiceCodecChoice.Codec2,
     val bitrate: AmrNbBitrate = AmrNbBitrate.MR795,
     val opusBitrateKbps: Int = 12,
     val codec2Mode: Codec2Mode = Codec2Mode.MODE_3200,
     val maxDurationSeconds: Int = 20,
-    val chunkTimeoutSeconds: Int = 30,
+    // Mirrors core's DEFAULT_REASSEMBLY_TIMEOUT_SECS (1200s / 20 min). This is
+    // the hard reassembly ceiling: it must cover a full clip's airtime plus
+    // NACK recovery on slow LoRa presets (a near-MTU clip on Long Slow can
+    // take minutes to send). Earlier 30s defaults forced spurious
+    // "partial: N/M chunks" while the sender was still in its initial burst.
+    val chunkTimeoutSeconds: Int = 1200,
     val partialPlayOnTimeout: Boolean = true,
     val noiseSuppressionEnabled: Boolean = true,
 )
