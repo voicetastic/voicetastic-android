@@ -20,7 +20,7 @@ enum class VoiceCodecChoice {
  * @param noiseSuppressionEnabled Use AudioSource.VOICE_COMMUNICATION + NoiseSuppressor / AGC during recording. Disable for raw mic capture.
  */
 data class VoiceConfig(
-    val codec: VoiceCodecChoice = VoiceCodecChoice.AmrNb,
+    val codec: VoiceCodecChoice = VoiceCodecChoice.Codec2,
     val bitrate: AmrNbBitrate = AmrNbBitrate.MR795,
     val opusBitrateKbps: Int = 12,
     val codec2Mode: Codec2Mode = Codec2Mode.MODE_3200,
