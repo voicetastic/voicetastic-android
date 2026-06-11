@@ -14,8 +14,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import re.chasam.voicetastic.core.NodeIds
@@ -26,6 +29,8 @@ import re.chasam.voicetastic.model.VoiceCodecChoice
 import re.chasam.voicetastic.service.DeliveryStatus
 import re.chasam.voicetastic.service.MeshFacade
 import re.chasam.voicetastic.service.Portnums
+import re.chasam.voicetastic.voice.RustAssembler
+import re.chasam.voicetastic.voice.VoiceAssemblerApi
 import re.chasam.voicetastic.voice.VoicePlayer
 import re.chasam.voicetastic.voice.VoicePlayerApi
 import re.chasam.voicetastic.voice.VoiceRecorder
@@ -34,11 +39,11 @@ import uniffi.voicetastic.AssemblerConfig
 import uniffi.voicetastic.AssemblyEvent
 import uniffi.voicetastic.SendRequestUdl
 import uniffi.voicetastic.SendStatus
-import uniffi.voicetastic.VoiceAssembler as RustVoiceAssembler
 import uniffi.voicetastic.VoiceCodec
 import uniffi.voicetastic.VoiceMessageOut
 import uniffi.voicetastic.VoiceSenderListener
 import java.io.File
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Per-message outgoing voice transfer progress, surfaced to the chat UI
@@ -90,6 +95,8 @@ class MessagingViewModel(
     // never pass these and get the framework-backed implementations.
     private val recorder: VoiceRecorderApi = VoiceRecorder(context),
     private val player: VoicePlayerApi = VoicePlayer(),
+    // Assembler is injectable for tests; production gets the native-backed impl.
+    private val assemblerFactory: (AssemblerConfig) -> VoiceAssemblerApi = { RustAssembler(it) },
 ) : ViewModel() {
 
     companion object {
@@ -161,10 +168,14 @@ class MessagingViewModel(
      * here so the bound is uniform; bypassing it means a memory leak.
      */
     private fun appendChatItem(item: ChatItem) {
-        val current = _allChatItems.value
-        val withItem = current + item
-        _allChatItems.value =
+        // Atomic RMW: sendVoiceFile appends from Dispatchers.IO while the
+        // incoming-message collectors append on the main dispatcher, so a
+        // plain value=value+item read-modify-write could drop an append (and
+        // hand out a duplicate id, which crashes the keyed LazyColumn).
+        _allChatItems.update { current ->
+            val withItem = current + item
             if (withItem.size > MAX_CHAT_ITEMS) withItem.takeLast(MAX_CHAT_ITEMS) else withItem
+        }
     }
 
     val selectedNode: StateFlow<MeshNode?>
@@ -225,18 +236,21 @@ class MessagingViewModel(
     // Voice state — recorder/player are injected via the constructor
     // (see VoiceRecorderApi / VoicePlayerApi) so tests can swap fakes.
 
+    /** Build an [AssemblerConfig] from the live [VoiceConfig] user settings. */
+    private fun assemblerConfigFrom(cfg: VoiceConfig): AssemblerConfig = AssemblerConfig(
+        messageTimeoutMs = (cfg.chunkTimeoutSeconds * 1000L).toULong(),
+        partialPlayOnTimeout = cfg.partialPlayOnTimeout,
+        maxNackRounds = MAX_NACK_ROUNDS,
+        nackWindowMs = NACK_WINDOW_MS,
+        completionMemoryMs = COMPLETION_MEMORY_MS,
+    )
+
     /**
      * Native voice assembler. Owned by this ViewModel; closed in [onCleared].
+     * Reconfigured live when the user changes the relevant voice settings (see
+     * the collector in [init]).
      */
-    private val assembler: RustVoiceAssembler = RustVoiceAssembler(
-        AssemblerConfig(
-            messageTimeoutMs = (voiceConfig.value.chunkTimeoutSeconds * 1000L).toULong(),
-            partialPlayOnTimeout = voiceConfig.value.partialPlayOnTimeout,
-            maxNackRounds = MAX_NACK_ROUNDS,
-            nackWindowMs = NACK_WINDOW_MS,
-            completionMemoryMs = COMPLETION_MEMORY_MS,
-        )
-    )
+    private val assembler: VoiceAssemblerApi = assemblerFactory(assemblerConfigFrom(voiceConfig.value))
 
     private val _completedVoiceMessages =
         MutableSharedFlow<VoiceMessageOut>(extraBufferCapacity = 16)
@@ -277,7 +291,9 @@ class MessagingViewModel(
 
     val config: StateFlow<VoiceConfig> = voiceConfig.asStateFlow()
 
-    private var itemIdCounter = 0
+    // Atomic so the IO-dispatched sendVoiceFile and the main-thread collectors
+    // never hand out a duplicate id (a duplicate key crashes the LazyColumn).
+    private val itemIdCounter = AtomicInteger(0)
     private var currentRecordingFile: File? = null
     private var tickJob: Job? = null
 
@@ -287,10 +303,37 @@ class MessagingViewModel(
         observeCompletedVoiceMessages()
         observeAckEvents()
         startTickLoop()
+        observeAssemblerConfig()
 
-        player.onCompletion = {
-            isPlaying.value = false
-            playingItemId.value = null
+        // The recorder can stop itself at the configured max duration. Pick the
+        // clip up here (any thread → hop to Main) instead of dropping it.
+        recorder.onMaxDurationReached = { file ->
+            viewModelScope.launch {
+                isRecording.value = false
+                if (file.exists() && file.length() > 0) {
+                    previewFile.value = file
+                } else {
+                    currentRecordingFile = null
+                }
+            }
+        }
+    }
+
+    /**
+     * Push live changes to the reassembly-timeout / partial-play settings into
+     * the running assembler so the Settings sliders take effect without a
+     * restart.
+     */
+    private fun observeAssemblerConfig() {
+        viewModelScope.launch {
+            voiceConfig
+                .map { it.chunkTimeoutSeconds to it.partialPlayOnTimeout }
+                .distinctUntilChanged()
+                .drop(1) // construction already applied the initial values
+                .collect {
+                    runCatching { assembler.setConfig(assemblerConfigFrom(voiceConfig.value)) }
+                        .onFailure { Log.w(TAG, "assembler.setConfig failed", it) }
+                }
         }
     }
 
@@ -304,14 +347,15 @@ class MessagingViewModel(
     private fun observeAckEvents() {
         viewModelScope.launch {
             meshService.ackEvents.collect { ev ->
-                val updated = _allChatItems.value.map { item ->
-                    if (item is ChatItem.Text && item.packetId == ev.packetId) {
-                        item.copy(deliveryStatus = ev.status)
-                    } else {
-                        item
+                _allChatItems.update { items ->
+                    items.map { item ->
+                        if (item is ChatItem.Text && item.packetId == ev.packetId) {
+                            item.copy(deliveryStatus = ev.status)
+                        } else {
+                            item
+                        }
                     }
                 }
-                _allChatItems.value = updated
             }
         }
     }
@@ -332,7 +376,7 @@ class MessagingViewModel(
                         "selectedCh=$selectedChan → willShow=$willShow"
                 )
                 val item = ChatItem.Text(
-                    id = ++itemIdCounter,
+                    id = itemIdCounter.incrementAndGet(),
                     text = incoming.text,
                     from = incoming.from,
                     to = incoming.to,
@@ -452,7 +496,7 @@ class MessagingViewModel(
             is VoiceCodec.Unknown -> c.raw.toInt()
         }
         return ChatItem.Voice(
-            id = ++itemIdCounter,
+            id = itemIdCounter.incrementAndGet(),
             from = from,
             to = toStr,
             audioData = audio,
@@ -490,7 +534,7 @@ class MessagingViewModel(
             // ever arrive to clear a Pending state.
             val initialStatus = if (destination != null) DeliveryStatus.Pending else null
             val item = ChatItem.Text(
-                id = ++itemIdCounter,
+                id = itemIdCounter.incrementAndGet(),
                 text = text,
                 from = myId,
                 to = toField,
@@ -565,21 +609,29 @@ class MessagingViewModel(
     fun playPreview() {
         val file = previewFile.value ?: return
         if (isPreviewPlaying.value) return
+        // Mark playing up front; player.play() returns at start-of-playback,
+        // so the flag must be cleared from the completion callback (below),
+        // not synchronously — otherwise the Stop button never appears and
+        // stopPreviewPlayback() early-returns.
+        isPreviewPlaying.value = true
         viewModelScope.launch(Dispatchers.IO) {
-            val bytes = runCatching { file.readBytes() }.getOrNull() ?: return@launch
+            val bytes = runCatching { file.readBytes() }.getOrNull() ?: run {
+                isPreviewPlaying.value = false
+                return@launch
+            }
             val cfg = voiceConfig.value
             val (codec, param) = when (cfg.codec) {
                 VoiceCodecChoice.AmrNb -> VoiceCodec.AmrNb to cfg.bitrate.ordinal
                 VoiceCodecChoice.Opus -> VoiceCodec.Opus to cfg.opusBitrateKbps
                 VoiceCodecChoice.Codec2 -> VoiceCodec.Codec2 to cfg.codec2Mode.ordinal
             }
-            withContext(Dispatchers.Main) { isPreviewPlaying.value = true }
             try {
-                player.play(bytes, context.cacheDir, codec, param)
+                player.play(bytes, context.cacheDir, codec, param) {
+                    isPreviewPlaying.value = false
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "playPreview failed", e)
-            } finally {
-                withContext(Dispatchers.Main) { isPreviewPlaying.value = false }
+                isPreviewPlaying.value = false
             }
         }
     }
@@ -731,7 +783,7 @@ class MessagingViewModel(
         }
         val toField = destination ?: "broadcast"
         val item = ChatItem.Voice(
-            id = ++itemIdCounter,
+            id = itemIdCounter.incrementAndGet(),
             from = myId,
             to = toField,
             audioData = audioData,
@@ -762,7 +814,17 @@ class MessagingViewModel(
 
         isPlaying.value = true
         playingItemId.value = item.id
-        player.play(item.audioData, context.cacheDir, item.codec, item.bitrateIndex)
+        // Off the main thread: play() writes a temp file + MediaPlayer.prepare()
+        // synchronously. Clear state from the per-playback completion callback,
+        // guarded by item id so a stale completion can't unstick a newer item.
+        viewModelScope.launch(Dispatchers.IO) {
+            player.play(item.audioData, context.cacheDir, item.codec, item.bitrateIndex) {
+                if (playingItemId.value == item.id) {
+                    isPlaying.value = false
+                    playingItemId.value = null
+                }
+            }
+        }
     }
 
     /**

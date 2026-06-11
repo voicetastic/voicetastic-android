@@ -56,8 +56,18 @@ interface MeshFacade {
     // ----- Connection control -----
 
     fun connect(device: BluetoothDevice)
+    /**
+     * Begin a USB connection. Returns `true` when the attempt is accepted and
+     * started (the blocking port open + Rust handshake run off the caller
+     * thread); observe the real outcome via [connectionState] / [activeTransport].
+     */
     fun connectUsb(driver: UsbSerialDriver): Boolean
-    /** Connect to a Meshtastic node over TCP (default port 4403). */
+    /**
+     * Connect to a Meshtastic node over TCP (default port 4403). Returns `true`
+     * when the attempt is accepted and started; the blocking socket connect
+     * runs off the caller thread, so the real outcome is observed via
+     * [connectionState] / [activeTransport].
+     */
     fun connectTcp(host: String, port: Int): Boolean
     fun disconnect()
     fun disconnectUsb()

@@ -8,11 +8,16 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.hardware.usb.UsbDevice
 import android.hardware.usb.UsbManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.provider.Settings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.viewModels
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -37,10 +42,7 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import re.chasam.voicetastic.model.ThemePreference
 import re.chasam.voicetastic.model.ThemePreferenceStore
-import re.chasam.voicetastic.model.VoiceConfig
-import re.chasam.voicetastic.model.VoiceConfigStore
 import re.chasam.voicetastic.navigation.AppNavigation
-import re.chasam.voicetastic.service.MeshServiceManager
 import re.chasam.voicetastic.service.PhoneLocationProvider
 import re.chasam.voicetastic.ui.chat.MessagingViewModel
 import re.chasam.voicetastic.ui.settings.ConfigViewModel
@@ -48,15 +50,34 @@ import re.chasam.voicetastic.ui.theme.AppTheme
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var meshServiceManager: MeshServiceManager
-    private lateinit var messagingViewModel: MessagingViewModel
-    private lateinit var configViewModel: ConfigViewModel
+    // Session graph (manager + persisted voiceConfig) lives in a retained
+    // ViewModel so its background work is torn down via onCleared() exactly
+    // once, instead of leaking for the process lifetime.
+    private val sessionViewModel: SessionViewModel by viewModels()
 
-    // Initialised in initializeApp() so we can hand the activity context
-    // to VoiceConfigStore before constructing the flow. Default value is
-    // used as a fallback if persistence has never been written.
-    private lateinit var voiceConfigStore: VoiceConfigStore
-    private val voiceConfig = MutableStateFlow(VoiceConfig())
+    private val messagingViewModel: MessagingViewModel by viewModels {
+        viewModelFactory {
+            initializer {
+                MessagingViewModel(
+                    sessionViewModel.meshServiceManager,
+                    application,
+                    sessionViewModel.voiceConfig,
+                )
+            }
+        }
+    }
+
+    private val configViewModel: ConfigViewModel by viewModels {
+        viewModelFactory {
+            initializer {
+                ConfigViewModel(
+                    sessionViewModel.meshServiceManager,
+                    sessionViewModel.voiceConfig,
+                    PhoneLocationProvider(applicationContext),
+                )
+            }
+        }
+    }
 
     private lateinit var themePreferenceStore: ThemePreferenceStore
     private val themePreference = MutableStateFlow(ThemePreference.SYSTEM)
@@ -72,6 +93,10 @@ class MainActivity : ComponentActivity() {
      */
     private var initialized by mutableStateOf(false)
     private var permissionsDenied by mutableStateOf(false)
+    // True once the user has permanently denied a required permission
+    // ("don't ask again" / second denial): re-requesting is auto-denied with
+    // no dialog, so the UI must offer an app-settings shortcut instead.
+    private var permanentlyDenied by mutableStateOf(false)
 
     /**
      * Listens for USB device hot-plug / unplug events broadcast by the OS.
@@ -88,7 +113,7 @@ class MainActivity : ComponentActivity() {
      */
     private val usbReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (!::meshServiceManager.isInitialized) return
+            if (!initialized) return
             if (intent.action != UsbManager.ACTION_USB_DEVICE_DETACHED) return
             val device: UsbDevice = (
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -98,7 +123,7 @@ class MainActivity : ComponentActivity() {
                     intent.getParcelableExtra<UsbDevice>(UsbManager.EXTRA_DEVICE)
                 }
             ) ?: return
-            meshServiceManager.onUsbDeviceDetached(device)
+            sessionViewModel.meshServiceManager.onUsbDeviceDetached(device)
         }
     }
 
@@ -108,9 +133,16 @@ class MainActivity : ComponentActivity() {
         val allGranted = permissions.values.all { it }
         if (allGranted) {
             permissionsDenied = false
+            permanentlyDenied = false
             initializeApp()
         } else {
             permissionsDenied = true
+            // If a denied permission no longer shows a rationale, the system
+            // will silently auto-deny future requests — surface the settings
+            // path instead of a Retry that does nothing.
+            permanentlyDenied = permissions.any { (perm, granted) ->
+                !granted && !shouldShowRequestPermissionRationale(perm)
+            }
         }
     }
 
@@ -139,29 +171,27 @@ class MainActivity : ComponentActivity() {
                 initialized -> AppNavigation(
                     messagingViewModel = messagingViewModel,
                     configViewModel = configViewModel,
-                    meshServiceManager = meshServiceManager,
+                    meshServiceManager = sessionViewModel.meshServiceManager,
                     themePreference = currentTheme,
                     onThemePreferenceChange = { themePreference.value = it },
                 )
-                permissionsDenied -> PermissionsDeniedScreen(onRetry = ::requestPermissions)
+                permissionsDenied -> PermissionsDeniedScreen(
+                    permanentlyDenied = permanentlyDenied,
+                    onRetry = ::requestPermissions,
+                    onOpenSettings = ::openAppSettings,
+                )
                 else -> LoadingScreen()
             }
         }
     }
 
     private fun initializeApp() {
-        meshServiceManager = MeshServiceManager(this)
-
-        // Hydrate voice config from disk before wiring view models so the
-        // first render sees the user's last-saved values (codec choice,
-        // mode, noise suppression toggle, etc.) instead of defaults.
-        voiceConfigStore = VoiceConfigStore(this)
-        voiceConfig.value = voiceConfigStore.load()
-        // `drop(1)` skips the initial emission we just set above — no
-        // point writing back what we just read.
-        lifecycleScope.launch {
-            voiceConfig.drop(1).collect { voiceConfigStore.save(it) }
-        }
+        // Idempotent: a process-death restore can run this from onCreate and
+        // then again from the redelivered permission callback. Guard so we
+        // don't double-register the USB receiver or double-subscribe the
+        // theme persistence collector. (The session graph itself is safe —
+        // the ViewModelStore returns the existing instances either way.)
+        if (initialized) return
 
         themePreferenceStore = ThemePreferenceStore(this)
         themePreference.value = themePreferenceStore.load()
@@ -169,12 +199,12 @@ class MainActivity : ComponentActivity() {
             themePreference.drop(1).collect { themePreferenceStore.save(it) }
         }
 
-        messagingViewModel = MessagingViewModel(meshServiceManager, this, voiceConfig)
-        configViewModel = ConfigViewModel(
-            meshServiceManager,
-            voiceConfig,
-            PhoneLocationProvider(applicationContext)
-        )
+        // Touch the feature view models so they're constructed deterministically
+        // here (the session graph / voiceConfig hydration lives in
+        // SessionViewModel). Lazy `by viewModels` would otherwise defer creation
+        // until first composition.
+        messagingViewModel
+        configViewModel
 
         registerUsbReceiver()
         // NOTE: we deliberately do NOT auto-connect on the launching intent
@@ -182,8 +212,7 @@ class MainActivity : ComponentActivity() {
         // user picks the transport on the Devices screen.
 
         // Flip last: the Compose Root is already live, and this single
-        // assignment swaps the loading screen for the real navigation
-        // tree once every lateinit above has been populated.
+        // assignment swaps the loading screen for the real navigation tree.
         initialized = true
     }
 
@@ -199,12 +228,35 @@ class MainActivity : ComponentActivity() {
     }
 
 
+    override fun onResume() {
+        super.onResume()
+        // Returning from the app-settings screen after the user granted the
+        // permission there: initialize without forcing another (auto-denied)
+        // request.
+        if (!initialized && hasRequiredPermissions()) {
+            permissionsDenied = false
+            permanentlyDenied = false
+            initializeApp()
+        }
+    }
+
     override fun onDestroy() {
         super.onDestroy()
-        try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
-        if (::meshServiceManager.isInitialized) {
-            meshServiceManager.destroy()
+        // The session graph is torn down by SessionViewModel.onCleared() when
+        // the activity is permanently destroyed; only the receiver (registered
+        // per activity instance) is unwound here.
+        if (initialized) {
+            try { unregisterReceiver(usbReceiver) } catch (_: Exception) {}
         }
+    }
+
+    private fun openAppSettings() {
+        startActivity(
+            Intent(
+                Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.fromParts("package", packageName, null),
+            )
+        )
     }
 
     private fun hasRequiredPermissions(): Boolean {
@@ -223,7 +275,11 @@ class MainActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun PermissionsDeniedScreen(onRetry: () -> Unit) {
+    private fun PermissionsDeniedScreen(
+        permanentlyDenied: Boolean,
+        onRetry: () -> Unit,
+        onOpenSettings: () -> Unit,
+    ) {
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             Box(modifier = Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
                 Column(
@@ -235,11 +291,20 @@ class MainActivity : ComponentActivity() {
                         style = MaterialTheme.typography.titleLarge,
                     )
                     Text(
-                        text = stringResource(R.string.permissions_denied_body),
+                        text = stringResource(
+                            if (permanentlyDenied) R.string.permissions_denied_permanent_body
+                            else R.string.permissions_denied_body
+                        ),
                         style = MaterialTheme.typography.bodyMedium,
                     )
-                    androidx.compose.material3.OutlinedButton(onClick = onRetry) {
-                        Text(stringResource(R.string.permissions_denied_retry))
+                    if (permanentlyDenied) {
+                        androidx.compose.material3.OutlinedButton(onClick = onOpenSettings) {
+                            Text(stringResource(R.string.permissions_denied_open_settings))
+                        }
+                    } else {
+                        androidx.compose.material3.OutlinedButton(onClick = onRetry) {
+                            Text(stringResource(R.string.permissions_denied_retry))
+                        }
                     }
                 }
             }

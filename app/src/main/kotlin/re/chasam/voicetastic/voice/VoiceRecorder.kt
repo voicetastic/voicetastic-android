@@ -35,9 +35,11 @@ class VoiceRecorder(private val context: Context) : VoiceRecorderApi {
 
     private var recorder: MediaRecorder? = null
     private var outputFile: File? = null
-    private var isRecording = false
+    @Volatile private var isRecording = false
     /** Serialises stopRecording / cleanup so the max-duration callback can't race the user. */
     private val stopLock = Any()
+
+    @Volatile override var onMaxDurationReached: ((File) -> Unit)? = null
 
     // Codec2 path state — only one of (recorder, codec2State) is live at once.
     private var codec2State: Codec2RecordingState? = null
@@ -91,7 +93,10 @@ class VoiceRecorder(private val context: Context) : VoiceRecorderApi {
                 setOnInfoListener { _, what, _ ->
                     if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) {
                         Log.i(TAG, "Max duration reached, stopping recording")
-                        stopRecording()
+                        // stopRecording() is idempotent and returns the file
+                        // only if WE won the stop race; hand it to the caller
+                        // so the clip isn't silently discarded.
+                        stopRecording()?.let { onMaxDurationReached?.invoke(it) }
                     }
                 }
                 prepare()
@@ -235,11 +240,15 @@ class VoiceRecorder(private val context: Context) : VoiceRecorderApi {
         state.workerThread = thread(name = "Codec2RecorderWorker", start = true) {
             val pcmBuf = ShortArray(samplesPerRead)
             val startMs = System.currentTimeMillis()
+            // True when the worker terminated on its own (max duration / read
+            // or encode error) rather than because stopRecording() asked it to.
+            var selfStopped = false
             try {
                 while (state.keepRunning) {
                     val read = audioRecord.read(pcmBuf, 0, samplesPerRead, AudioRecord.READ_BLOCKING)
                     if (read <= 0) {
                         if (read != 0) Log.w(TAG, "Codec2: AudioRecord.read returned $read")
+                        selfStopped = true
                         break
                     }
                     // Trim to whole frames. AudioRecord may short-read, drop the tail.
@@ -252,16 +261,34 @@ class VoiceRecorder(private val context: Context) : VoiceRecorderApi {
                         out.write(encoded)
                     } catch (e: Exception) {
                         Log.e(TAG, "Codec2: encode/write failed", e)
+                        selfStopped = true
                         break
                     }
                     if (System.currentTimeMillis() - startMs >= maxDurationMs) {
                         Log.i(TAG, "Codec2: max duration reached")
+                        selfStopped = true
                         break
                     }
                 }
             } finally {
                 try { out.flush() } catch (_: Exception) {}
                 try { out.close() } catch (_: Exception) {}
+            }
+            if (selfStopped) {
+                // We stopped ourselves; stopRecording() didn't run, so release
+                // the capture session here (otherwise the mic stays hot) and
+                // hand the file to the caller. The stopLock + identity check
+                // make this mutually exclusive with a user-initiated stop.
+                var finished: File? = null
+                synchronized(stopLock) {
+                    if (isRecording && codec2State === state) {
+                        isRecording = false
+                        codec2State = null
+                        releaseCodec2Locked(state)
+                        finished = state.file
+                    }
+                }
+                finished?.let { onMaxDurationReached?.invoke(it) }
             }
         }
 
@@ -287,7 +314,7 @@ class VoiceRecorder(private val context: Context) : VoiceRecorderApi {
                 setOnInfoListener { _, what, _ ->
                     if (what == MediaRecorder.MEDIA_RECORDER_INFO_MAX_DURATION_REACHED) {
                         Log.i(TAG, "Max duration reached, stopping recording")
-                        stopRecording()
+                        stopRecording()?.let { onMaxDurationReached?.invoke(it) }
                     }
                 }
                 prepare()
@@ -318,49 +345,72 @@ class VoiceRecorder(private val context: Context) : VoiceRecorderApi {
      *
      * @return the recorded audio file, or null if not currently recording
      */
-    override fun stopRecording(): File? = synchronized(stopLock) {
-        if (!isRecording) return null
-        isRecording = false
+    override fun stopRecording(): File? {
+        // Flip the recording flag + claim the Codec2 state under the lock so
+        // exactly one of {this call, the worker's self-stop} wins. We do NOT
+        // hold the lock across join()/release(): the worker's self-stop path
+        // also takes stopLock, so joining under it would deadlock.
+        val codecState: Codec2RecordingState?
+        synchronized(stopLock) {
+            if (!isRecording) return null
+            isRecording = false
+            codecState = codec2State
+            if (codecState != null) {
+                codecState.keepRunning = false
+                codec2State = null
+            }
+        }
 
-        // Codec2 path: signal worker to stop, join (worker closes its own
-        // output stream in finally), then release framework resources.
-        codec2State?.let { state ->
-            state.keepRunning = false
+        // Codec2 path: join (worker closes its own output stream in finally),
+        // then release framework resources. We won the flag flip, so the
+        // worker's self-stop block is a no-op and can't double-release.
+        if (codecState != null) {
             try {
-                state.workerThread?.join(CODEC2_DRAIN_TIMEOUT_MS)
+                codecState.workerThread?.join(CODEC2_DRAIN_TIMEOUT_MS)
             } catch (_: InterruptedException) {}
-            if (state.workerThread?.isAlive == true) {
+            if (codecState.workerThread?.isAlive == true) {
                 // Worker stuck in AudioRecord.read or encode; file may be
                 // truncated. Surface this so the caller can decide.
                 Log.w(TAG, "Codec2: worker did not finish within ${CODEC2_DRAIN_TIMEOUT_MS}ms")
             }
-            try { state.audioRecord.stop() } catch (_: Exception) {}
-            // Release audiofx effects before the AudioRecord — they hold
-            // references to its session, and releasing AudioRecord first
-            // can race with the effects' internal teardown on some OEMs.
-            try { state.noiseSuppressor?.release() } catch (_: Exception) {}
-            try { state.gainControl?.release() } catch (_: Exception) {}
-            try { state.audioRecord.release() } catch (_: Exception) {}
-            try { state.encoder.close() } catch (_: Exception) {}
-            codec2State = null
-            Log.i(TAG, "Recording stopped (Codec2): ${state.file.length()} bytes")
-            return state.file
+            synchronized(stopLock) { releaseCodec2Locked(codecState) }
+            Log.i(TAG, "Recording stopped (Codec2): ${codecState.file.length()} bytes")
+            return codecState.file
         }
 
-        return try {
-            recorder?.stop()
-            recorder?.release()
-            recorder = null
-            Log.i(TAG, "Recording stopped: ${outputFile?.length() ?: 0} bytes")
-            outputFile
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to stop recording", e)
-            cleanupLocked()
-            null
+        return synchronized(stopLock) {
+            try {
+                recorder?.stop()
+                recorder?.release()
+                recorder = null
+                Log.i(TAG, "Recording stopped: ${outputFile?.length() ?: 0} bytes")
+                outputFile
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to stop recording", e)
+                cleanupLocked()
+                null
+            }
         }
     }
 
     override fun isCurrentlyRecording(): Boolean = isRecording
+
+    /**
+     * Release the Codec2 capture session (AudioRecord, audiofx effects,
+     * encoder). Caller must hold [stopLock]. Does NOT join the worker or
+     * touch [codec2State] — the caller owns thread-join and state nulling
+     * (the worker can't join itself).
+     */
+    private fun releaseCodec2Locked(state: Codec2RecordingState) {
+        try { state.audioRecord.stop() } catch (_: Exception) {}
+        // Release audiofx effects before the AudioRecord — they hold
+        // references to its session, and releasing AudioRecord first can
+        // race with the effects' internal teardown on some OEMs.
+        try { state.noiseSuppressor?.release() } catch (_: Exception) {}
+        try { state.gainControl?.release() } catch (_: Exception) {}
+        try { state.audioRecord.release() } catch (_: Exception) {}
+        try { state.encoder.close() } catch (_: Exception) {}
+    }
 
     /**
      * Best-effort teardown used only on error paths. Caller must hold

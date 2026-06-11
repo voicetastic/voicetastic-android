@@ -84,6 +84,10 @@ class UsbMeshTransport(private val context: Context) {
     private val usbManager: UsbManager =
         context.getSystemService(Context.USB_SERVICE) as UsbManager
     private val parser = MeshSerialFraming.Parser()
+    // Serialises parser access: feed() runs on the SerialInputOutputManager IO
+    // thread while reset() can be called from a caller thread in connect()/
+    // disconnect(). The parser's internal deque is not thread-safe.
+    private val parserLock = Any()
 
     private var port: UsbSerialPort? = null
     private var ioManager: SerialInputOutputManager? = null
@@ -138,6 +142,12 @@ class UsbMeshTransport(private val context: Context) {
                 onResult(granted)
             }
         }
+        // Drop any receiver from a previous, still-pending request (e.g. the
+        // user dismissed the dialog without a result) so we don't leak it or
+        // lose the handle needed to unregister it later.
+        permissionReceiver?.let {
+            try { context.unregisterReceiver(it) } catch (_: Exception) {}
+        }
         permissionReceiver = receiver
         val filter = IntentFilter(ACTION_USB_PERMISSION)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
@@ -188,7 +198,7 @@ class UsbMeshTransport(private val context: Context) {
                 Log.w(TAG, "Could not set DTR/RTS: ${e.message}")
             }
             port = serialPort
-            parser.reset()
+            synchronized(parserLock) { parser.reset() }
             startIoPump(serialPort)
             // Kick the firmware out of debug-log mode and into protocol
             // mode so the very next ToRadio (typically `want_config_id`)
@@ -212,7 +222,7 @@ class UsbMeshTransport(private val context: Context) {
         val mgr = SerialInputOutputManager(serialPort, object : SerialInputOutputManager.Listener {
             override fun onNewData(data: ByteArray) {
                 try {
-                    val payloads = parser.feed(data)
+                    val payloads = synchronized(parserLock) { parser.feed(data) }
                     if (payloads.isNotEmpty()) {
                         for (p in payloads) incomingFromRadio.tryEmit(p)
                     }
@@ -291,7 +301,7 @@ class UsbMeshTransport(private val context: Context) {
         }
         connectedDevice.value = null
         if (state.value != State.ERROR) state.value = State.DISCONNECTED
-        parser.reset()
+        synchronized(parserLock) { parser.reset() }
     }
 
     fun destroy() {

@@ -4,7 +4,6 @@ import android.util.Log
 import com.hoho.android.usbserial.driver.UsbSerialDriver
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
@@ -48,34 +47,79 @@ class UsbMeshTransportV2(
 
     companion object {
         private const val TAG = "UsbMeshTransportV2"
+        /** Cap on frames buffered before attachSink (drop-oldest on overflow). */
+        private const val PRE_SINK_BUFFER_MAX = 64
     }
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     @Volatile private var sink: MeshTransportSink? = null
-    private var pumpJob: Job? = null
     @Volatile private var closed = false
 
+    // Frames decoded before attachSink() runs are buffered here (under
+    // sinkLock) and flushed in order once the sink is wired. We subscribe to
+    // incomingFromRadio eagerly in init — before meshService.connect() can
+    // trigger traffic — because that SharedFlow has no replay; a frame
+    // emitted with no subscriber would be lost.
+    private val sinkLock = Any()
+    private val preSinkBuffer = ArrayDeque<ByteArray>()
+
+    init {
+        startPump()
+        startStateObserver()
+    }
+
     /**
-     * Wire the Rust-side inbound sink. Starts the
-     * [UsbMeshTransport.incomingFromRadio] → [MeshTransportSink.pushInbound]
-     * pump. Calling twice replaces the sink (previous sink is **not**
-     * closed by this class).
+     * Wire the Rust-side inbound sink and flush any frames buffered before
+     * the sink existed. Calling twice replaces the sink (previous sink is
+     * **not** closed by this class).
      */
     fun attachSink(sink: MeshTransportSink) {
-        this.sink = sink
-        if (pumpJob == null) startPump()
+        val pending: List<ByteArray>
+        synchronized(sinkLock) {
+            this.sink = sink
+            pending = preSinkBuffer.toList()
+            preSinkBuffer.clear()
+        }
+        for (f in pending) sink.pushInbound(f)
     }
 
     private fun startPump() {
-        pumpJob = scope.launch {
+        scope.launch {
             // Forward every frame (no `collectLatest` — we don't want to
             // cancel an in-flight delivery just because the next frame
             // showed up). `incomingFromRadio` is a SharedFlow with a
             // 64-slot buffer, so a brief Rust-side stall doesn't lose
             // data either.
             inner.incomingFromRadio.collect { bytes ->
-                val s = sink ?: return@collect
-                if (bytes.isNotEmpty()) s.pushInbound(bytes)
+                if (bytes.isEmpty()) return@collect
+                synchronized(sinkLock) {
+                    val s = sink
+                    if (s != null) {
+                        s.pushInbound(bytes)
+                    } else {
+                        if (preSinkBuffer.size >= PRE_SINK_BUFFER_MAX) preSinkBuffer.removeFirst()
+                        preSinkBuffer.addLast(bytes)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun startStateObserver() {
+        scope.launch {
+            // Propagate a USB unplug / I/O error to Rust: the legacy transport
+            // sets DISCONNECTED/ERROR on detach (onDeviceDetached) and on
+            // onRunError, but only this adapter holds the sink. Without this,
+            // Rust never sees the wire drop and the app stays "CONNECTED".
+            // sink?.shutdown() is idempotent; the current state at init time
+            // is CONNECTED, so the first emission we react to is a real
+            // transition.
+            inner.state.collect { st ->
+                if (st == UsbMeshTransport.State.DISCONNECTED ||
+                    st == UsbMeshTransport.State.ERROR
+                ) {
+                    sink?.shutdown()
+                }
             }
         }
     }
@@ -92,7 +136,6 @@ class UsbMeshTransportV2(
     override fun shutdown() {
         if (closed) return
         closed = true
-        pumpJob?.cancel(); pumpJob = null
         // Notify Rust that the wire is gone. Safe to call even before
         // a sink was attached — `sink?` short-circuits. Renamed from
         // `close` to avoid `AutoCloseable.close()` ambiguity in the

@@ -50,8 +50,11 @@ fun ChatScreen(viewModel: MessagingViewModel) {
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
 
-    // Auto-scroll to bottom on new messages
-    LaunchedEffect(chatItems.size) {
+    // Auto-scroll to bottom on new messages. Keyed on the last item's id plus
+    // the conversation (not size): at the retention cap eviction keeps size
+    // constant, and switching to a conversation with an equal count wouldn't
+    // re-fire a size-keyed effect.
+    LaunchedEffect(chatItems.lastOrNull()?.id, selectedNode?.nodeId, selectedChannel) {
         if (chatItems.isNotEmpty()) {
             listState.animateScrollToItem(chatItems.lastIndex)
         }

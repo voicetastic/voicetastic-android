@@ -42,6 +42,16 @@ class TcpMeshTransport(
     @Volatile private var sink: MeshTransportSink? = null
     @Volatile private var closed = false
 
+    // Frames decoded before attachSink() runs are buffered here (under
+    // sinkLock) and flushed in order once the sink is wired, so a fast
+    // radio response (e.g. the first config-burst frame) that beats
+    // attachSink isn't silently dropped.
+    private val sinkLock = Any()
+    private val preSinkBuffer = ArrayDeque<ByteArray>()
+    // Serialises socket writes so two concurrent writeToRadio() callers can't
+    // interleave the bytes of two frames on the stream.
+    private val writeLock = Any()
+
     val isConnected: Boolean get() = !closed && socket?.isConnected == true
 
     /**
@@ -70,7 +80,13 @@ class TcpMeshTransport(
 
     /** Wire the Rust-side inbound sink (call after [connect], before traffic). */
     fun attachSink(sink: MeshTransportSink) {
-        this.sink = sink
+        val pending: List<ByteArray>
+        synchronized(sinkLock) {
+            this.sink = sink
+            pending = preSinkBuffer.toList()
+            preSinkBuffer.clear()
+        }
+        for (f in pending) sink.pushInbound(f)
     }
 
     private fun startReader(s: Socket) {
@@ -83,8 +99,18 @@ class TcpMeshTransport(
                     if (n < 0) break          // EOF: peer closed
                     if (n == 0) continue
                     val frames = parser.feed(buf, 0, n)
-                    val sk = sink ?: continue
-                    for (f in frames) if (f.isNotEmpty()) sk.pushInbound(f)
+                    for (f in frames) {
+                        if (f.isEmpty()) continue
+                        synchronized(sinkLock) {
+                            val sk = sink
+                            if (sk != null) {
+                                sk.pushInbound(f)
+                            } else {
+                                if (preSinkBuffer.size >= PRE_SINK_BUFFER_MAX) preSinkBuffer.removeFirst()
+                                preSinkBuffer.addLast(f)
+                            }
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 if (!closed) Log.w(TAG, "TCP read loop ended", e)
@@ -98,8 +124,11 @@ class TcpMeshTransport(
     override fun writeToRadio(data: ByteArray) {
         val o = output ?: return
         try {
-            o.write(MeshSerialFraming.encode(data))
-            o.flush()
+            val framed = MeshSerialFraming.encode(data)
+            synchronized(writeLock) {
+                o.write(framed)
+                o.flush()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "TCP write failed", e)
         }
@@ -122,5 +151,7 @@ class TcpMeshTransport(
         const val DEFAULT_PORT = 4403
         private const val CONNECT_TIMEOUT_MS = 8_000
         private const val READ_BUFFER_SIZE = 4_096
+        /** Cap on frames buffered before attachSink (drop-oldest on overflow). */
+        private const val PRE_SINK_BUFFER_MAX = 64
     }
 }

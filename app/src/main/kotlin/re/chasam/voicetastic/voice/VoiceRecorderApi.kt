@@ -22,4 +22,15 @@ interface VoiceRecorderApi {
     fun startRecording(config: VoiceConfig): File?
     fun stopRecording(): File?
     fun isCurrentlyRecording(): Boolean
+
+    /**
+     * Invoked when the recorder stops *itself* — the configured max duration
+     * was reached (or the Codec2 worker aborted). Carries the finished file so
+     * the caller can transition to preview instead of silently dropping the
+     * clip. NOT invoked when the caller wins the stop race via [stopRecording].
+     *
+     * THREADING: fires on the MediaRecorder event thread (AMR-NB / Opus) or on
+     * the Codec2 worker thread — never assume the main thread.
+     */
+    var onMaxDurationReached: ((File) -> Unit)?
 }

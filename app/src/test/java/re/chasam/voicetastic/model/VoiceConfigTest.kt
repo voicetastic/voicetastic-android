@@ -11,9 +11,9 @@ class VoiceConfigTest : FunSpec({
         config.maxDurationSeconds shouldBe 20
     }
 
-    test("default config has 30s chunk timeout") {
+    test("default config has 1200s chunk timeout") {
         val config = VoiceConfig()
-        config.chunkTimeoutSeconds shouldBe 30
+        config.chunkTimeoutSeconds shouldBe 1200
     }
 
     test("default config has MR795 bitrate") {

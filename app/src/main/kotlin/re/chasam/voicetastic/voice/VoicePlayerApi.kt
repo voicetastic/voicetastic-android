@@ -16,14 +16,20 @@ interface VoicePlayerApi {
     val isPlaying: Boolean
 
     /**
-     * Invoked exactly once per playback for framework-driven endings
-     * (natural completion, error, marker reached). NOT invoked for
-     * caller-initiated [stop] — that path is silent on purpose so the
-     * UI can clear its `isPlaying` flag once at the stop call site.
+     * Play [audioData]. [onComplete] fires exactly once per call for
+     * framework-driven endings (natural completion, error, marker reached, or
+     * a setup failure). It is NOT invoked for caller-initiated [stop], nor when
+     * this playback is superseded by a later [play] — so a stale callback can
+     * never tear down a newer playback. May fire on a framework thread.
      */
-    var onCompletion: (() -> Unit)?
+    fun play(
+        audioData: ByteArray,
+        cacheDir: File,
+        codec: VoiceCodec,
+        codecParam: Int = 0,
+        onComplete: (() -> Unit)? = null,
+    )
 
-    fun play(audioData: ByteArray, cacheDir: File, codec: VoiceCodec, codecParam: Int = 0)
     fun stop()
     fun release()
 }
