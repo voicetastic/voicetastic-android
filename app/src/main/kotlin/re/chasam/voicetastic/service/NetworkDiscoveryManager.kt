@@ -6,6 +6,7 @@ import android.net.nsd.NsdServiceInfo
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.update
 import java.util.ArrayDeque
 
 /** A Meshtastic node discovered on the local network via mDNS. */
@@ -45,9 +46,13 @@ class NetworkDiscoveryManager(context: Context) {
     private val resolveQueue = ArrayDeque<NsdServiceInfo>()
     private var resolving = false
     private val lock = Any()
+    // Set in stop(); gates resolves that complete after stop() so a late
+    // callback can't re-add a stale device to a list the UI may still show.
+    @Volatile private var stopped = false
 
     fun start() {
         if (discoveryListener != null) return
+        stopped = false
         devices.value = emptyList()
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(serviceType: String) {
@@ -60,7 +65,7 @@ class NetworkDiscoveryManager(context: Context) {
 
             override fun onServiceLost(service: NsdServiceInfo) {
                 val name = service.serviceName
-                devices.value = devices.value.filterNot { it.name == name }
+                devices.update { list -> list.filterNot { it.name == name } }
             }
 
             override fun onDiscoveryStopped(serviceType: String) {
@@ -89,6 +94,7 @@ class NetworkDiscoveryManager(context: Context) {
     }
 
     fun stop() {
+        stopped = true
         discoveryListener?.let { runCatching { nsd.stopServiceDiscovery(it) } }
         discoveryListener = null
         isDiscovering.value = false
@@ -109,10 +115,12 @@ class NetworkDiscoveryManager(context: Context) {
             override fun onServiceResolved(info: NsdServiceInfo) {
                 @Suppress("DEPRECATION")
                 val addr = info.host?.hostAddress
-                if (addr != null) {
+                // Drop resolves that landed after stop() so a late callback
+                // can't repopulate a list the user already dismissed.
+                if (addr != null && !stopped) {
                     val dev = NetworkDevice(info.serviceName, addr, info.port)
                     // De-dup by host:port; replace any stale same-key entry.
-                    devices.value = devices.value.filterNot { it.key == dev.key } + dev
+                    devices.update { list -> list.filterNot { it.key == dev.key } + dev }
                 }
                 resolveNext()
             }

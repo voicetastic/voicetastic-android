@@ -1,7 +1,8 @@
 package re.chasam.voicetastic.navigation
 
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -78,13 +79,18 @@ fun AppNavigation(
         else -> MaterialTheme.colorScheme.errorContainer
     }
 
-    val shimmerProgress by animateFloatAsState(
-        targetValue = if (connectionState == "CONNECTING") 1f else 0f,
-        animationSpec = infiniteRepeatable(tween(durationMillis = 1500)),
-        label = "shimmerAnimation"
-    )
-
+    // Only run the shimmer while CONNECTING. The transition (and its frame
+    // requests) exists only inside this branch, so it stops the moment the
+    // state leaves CONNECTING instead of an infiniteRepeatable that keeps the
+    // Choreographer ticking forever.
     val logoTint = if (connectionState == "CONNECTING") {
+        val shimmer = rememberInfiniteTransition(label = "shimmerAnimation")
+        val shimmerProgress by shimmer.animateFloat(
+            initialValue = 0f,
+            targetValue = 1f,
+            animationSpec = infiniteRepeatable(tween(durationMillis = 1500)),
+            label = "shimmerProgress",
+        )
         lerp(logoColor, logoColor.copy(alpha = 0.4f), shimmerProgress)
     } else {
         logoColor

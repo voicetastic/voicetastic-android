@@ -3,7 +3,9 @@ package re.chasam.voicetastic.ui.settings
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.geeksville.mesh.MeshProtos
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -1091,6 +1093,15 @@ class ConfigViewModel(
             // Snapshot the LoRa config reference so we can detect *any* refresh
             // activity (a new emission with the same value or a new instance).
             val before = meshService.radioConfig.value
+            // Subscribe BEFORE triggering the refresh: configComplete has no
+            // replay, so on a fast transport (USB, <300 ms) the completion can
+            // be emitted between refreshConfig() and a later first() and be
+            // silently dropped — producing a spurious 8 s timeout toast.
+            // UNDISPATCHED runs the collector to its first suspension (the
+            // first() subscribe) synchronously before refreshConfig() fires.
+            val completion = async(start = CoroutineStart.UNDISPATCHED) {
+                meshService.configComplete.first()
+            }
             meshService.refreshConfig()
             // Race the firmware's configComplete event against a timeout so
             // the status never sticks at "requested…". On USB the burst is
@@ -1099,14 +1110,16 @@ class ConfigViewModel(
             // of a want_config_id burst, but if it ever doesn't (LogRecord
             // floods, oneof confusion, etc.) we still resync the UI here.
             val completedId = withTimeoutOrNull(8_000) {
-                meshService.configComplete.first()
+                completion.await()
             }
             if (completedId != null) {
                 // The configComplete collector in init{} already ran sync +
                 // set "Config received"; nothing else to do.
                 return@launch
             }
-            // Timed out. Decide whether *anything* arrived in the meantime.
+            // Timed out. Stop the orphaned collector, then decide whether
+            // *anything* arrived in the meantime.
+            completion.cancel()
             syncFromServiceFlows()
             val after = meshService.radioConfig.value
             configStatus.value = when {

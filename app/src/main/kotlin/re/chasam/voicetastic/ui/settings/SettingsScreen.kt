@@ -795,11 +795,25 @@ private fun SwitchSetting(label: String, checked: Boolean, onCheckedChange: (Boo
     }
 }
 
+/**
+ * Integer field that keeps a local text buffer so intermediate states
+ * ("", "-") aren't clobbered mid-typing. The buffer only resyncs from
+ * [value] on a genuine external change (e.g. a config refresh), detected by
+ * comparing the parsed buffer against [value] — never on an echo of our own
+ * [onValueChange].
+ */
 @Composable
 private fun NumberFieldSetting(label: String, value: Int, onValueChange: (Int) -> Unit) {
+    var text by remember { mutableStateOf(value.toString()) }
+    LaunchedEffect(value) {
+        if ((text.toIntOrNull() ?: 0) != value) text = value.toString()
+    }
     OutlinedTextField(
-        value = value.toString(),
-        onValueChange = { onValueChange(it.toIntOrNull() ?: 0) },
+        value = text,
+        onValueChange = { newText ->
+            text = newText
+            onValueChange(newText.toIntOrNull() ?: 0)
+        },
         label = { Text(label) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
@@ -809,9 +823,16 @@ private fun NumberFieldSetting(label: String, value: Int, onValueChange: (Int) -
 
 @Composable
 private fun FloatFieldSetting(label: String, value: Float, onValueChange: (Float) -> Unit) {
+    var text by remember { mutableStateOf(if (value == 0f) "0" else value.toString()) }
+    LaunchedEffect(value) {
+        if ((text.toFloatOrNull() ?: 0f) != value) text = if (value == 0f) "0" else value.toString()
+    }
     OutlinedTextField(
-        value = if (value == 0f) "0" else value.toString(),
-        onValueChange = { onValueChange(it.toFloatOrNull() ?: 0f) },
+        value = text,
+        onValueChange = { newText ->
+            text = newText
+            onValueChange(newText.toFloatOrNull() ?: 0f)
+        },
         label = { Text(label) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,
@@ -825,12 +846,18 @@ private fun FloatFieldSetting(label: String, value: Float, onValueChange: (Float
  * needed for sub-metre accuracy.
  *
  * Holds a local string so the user can type intermediate states like "-",
- * "1.", or "1.0" without the value being clobbered to 0 mid-typing.
+ * "1.", or "1.0" without the value being clobbered mid-typing. The buffer is
+ * only resynced from [value] when an external change makes them diverge — not
+ * when [value] is merely echoing back what the user just typed (which would
+ * rewrite "4" to "4.0" after every keystroke).
  */
 @Composable
 private fun DoubleFieldSetting(label: String, value: Double, onValueChange: (Double) -> Unit) {
-    var text by remember(value) {
-        mutableStateOf(if (value == 0.0) "" else value.toString())
+    var text by remember { mutableStateOf(if (value == 0.0) "" else value.toString()) }
+    LaunchedEffect(value) {
+        if ((text.toDoubleOrNull() ?: 0.0) != value) {
+            text = if (value == 0.0) "" else value.toString()
+        }
     }
     OutlinedTextField(
         value = text,
@@ -870,9 +897,16 @@ private fun SecretFieldSetting(label: String, value: String, onValueChange: (Str
 @Composable
 private fun SecretNumberFieldSetting(label: String, value: Int, onValueChange: (Int) -> Unit) {
     var visible by remember { mutableStateOf(false) }
+    var text by remember { mutableStateOf(value.toString()) }
+    LaunchedEffect(value) {
+        if ((text.toIntOrNull() ?: 0) != value) text = value.toString()
+    }
     OutlinedTextField(
-        value = value.toString(),
-        onValueChange = { onValueChange(it.toIntOrNull() ?: 0) },
+        value = text,
+        onValueChange = { newText ->
+            text = newText
+            onValueChange(newText.toIntOrNull() ?: 0)
+        },
         label = { Text(label) },
         modifier = Modifier.fillMaxWidth(),
         singleLine = true,

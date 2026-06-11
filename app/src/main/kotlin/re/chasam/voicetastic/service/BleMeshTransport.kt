@@ -167,6 +167,8 @@ class BleMeshTransport(
 
     private var serviceDiscoveryRetries = 0
     private var setupCompleted = false
+    /** Single-shot guard so the setup listener fires at most once. */
+    @Volatile private var setupSignaled = false
     private var pollingJob: Job? = null
     @Volatile private var closed = false
 
@@ -355,9 +357,20 @@ class BleMeshTransport(
                 }
                 BluetoothGatt.STATE_DISCONNECTED -> {
                     Log.w(TAG, "GATT disconnected (status=$status)")
-                    // Notify the Rust side so MeshService moves to
-                    // Disconnected without waiting on a separate close.
-                    sink?.shutdown()
+                    if (!setupCompleted) {
+                        // A disconnect before setup finished (classic
+                        // status-133 right after connect) would otherwise
+                        // leave the setup listener waiting the full
+                        // BLE_SETUP_TIMEOUT_MS — the sink is still null here,
+                        // so sink?.shutdown() is a no-op. Fail the listener
+                        // now and release the GATT.
+                        emitSetup(false, "GATT disconnected during setup (status=$status)")
+                        try { g.close() } catch (_: Exception) {}
+                    } else {
+                        // Notify the Rust side so MeshService moves to
+                        // Disconnected without waiting on a separate close.
+                        sink?.shutdown()
+                    }
                 }
             }
         }
@@ -392,6 +405,7 @@ class BleMeshTransport(
         override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.e(TAG, "Service discovery failed: $status")
+                emitSetup(false, "service discovery failed (status=$status)")
                 return
             }
             val service = g.getService(MeshtasticBle.SERVICE_UUID)
@@ -593,6 +607,11 @@ class BleMeshTransport(
     }
 
     private fun emitSetup(success: Boolean, error: String?) {
+        // Fire at most once: both the discovery-failure and the
+        // disconnect-during-setup paths can race, and the caller's
+        // CompletableDeferred must only be completed a single time.
+        if (setupSignaled) return
+        setupSignaled = true
         setupListener?.onSetupComplete(success, error)
     }
 

@@ -25,6 +25,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import org.osmdroid.config.Configuration
 import org.osmdroid.tileprovider.MapTileProviderBasic
 import org.osmdroid.tileprovider.modules.INetworkAvailablityCheck
@@ -71,6 +74,9 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
     // Bare holder (not State) so writing it doesn't trigger recomposition;
     // resets when the screen is re-entered (this remember is recreated).
     val centeredOnSelf = remember { booleanArrayOf(false) }
+    // One-shot latch for the provisional peers framing below, so subsequent
+    // node updates don't re-frame the camera and fight the user's pan/zoom.
+    val provisionallyFramed = remember { booleanArrayOf(false) }
     LaunchedEffect(nodes, myNodeId) {
         // Resolve our position from our own entry in the node list. The
         // selfNode StateFlow can lack lat/lon even when the node reports a
@@ -158,10 +164,7 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
         )
         Box(modifier = Modifier.fillMaxSize()) {
             AndroidView(
-                factory = {
-                    mapView.onResume()
-                    mapView
-                },
+                factory = { mapView },
                 modifier = Modifier.fillMaxSize(),
                 update = { mv ->
                     // Wipe + re-add markers. The peer list is small
@@ -229,10 +232,12 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
                     }
                     // Self-centering is handled by the LaunchedEffect above
                     // (post-layout). Until a self position exists, provisionally
-                    // frame known peers from the world view only, so the map
-                    // isn't stuck on the whole globe. The `!centeredOnSelf`
-                    // guard means a self fix still takes over when it arrives.
-                    if (!centeredOnSelf[0] && mv.zoomLevelDouble <= 2.5) {
+                    // frame known peers ONCE so the map isn't stuck on the whole
+                    // globe. A one-shot latch (not a zoom heuristic) means later
+                    // node updates never yank the camera back from a user pan;
+                    // the `!centeredOnSelf` guard still lets a self fix take over.
+                    if (!centeredOnSelf[0] && !provisionallyFramed[0] && points.isNotEmpty()) {
+                        provisionallyFramed[0] = true
                         if (points.size == 1) {
                             mv.controller.setCenter(points.first())
                             mv.controller.setZoom(18.0)
@@ -270,7 +275,24 @@ fun MapScreen(messagingViewModel: MessagingViewModel) {
         }
     }
 
-    DisposableEffect(Unit) {
-        onDispose { mapView.onPause(); mapView.onDetach() }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        // Forward the host lifecycle to osmdroid so its tile-fetch threads
+        // pause when the app is backgrounded (the factory used to call
+        // onResume() once and never forward pause/resume). addObserver
+        // replays the current state, so onResume fires on first composition.
+        val observer = LifecycleEventObserver { _, event ->
+            when (event) {
+                Lifecycle.Event.ON_RESUME -> mapView.onResume()
+                Lifecycle.Event.ON_PAUSE -> mapView.onPause()
+                else -> {}
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            mapView.onPause()
+            mapView.onDetach()
+        }
     }
 }

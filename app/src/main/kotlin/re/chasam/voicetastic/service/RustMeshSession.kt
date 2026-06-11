@@ -4,7 +4,7 @@ import android.bluetooth.BluetoothDevice
 import android.content.Context
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 import uniffi.voicetastic.MeshService
 import uniffi.voicetastic.MeshTransportSink
@@ -84,7 +84,15 @@ class RustMeshSession private constructor(
                 transport.shutdown()
                 error("BLE setup failed: ${outcome.second ?: "unknown"}")
             }
-            val sink = meshService.connect(transport, BLE_SETTLE_DELAY_MS)
+            val sink = try {
+                meshService.connect(transport, BLE_SETTLE_DELAY_MS)
+            } catch (t: Throwable) {
+                // The GATT connection is live at this point; if Rust rejects
+                // the transport we must release it or the radio's single BLE
+                // slot stays occupied until GC.
+                transport.shutdown()
+                throw t
+            }
             transport.attachSink(sink)
             return RustMeshSession(meshService, transport, sink)
         }
@@ -131,12 +139,13 @@ class RustMeshSession private constructor(
      * idempotently shut the adapter and sink. Safe to call multiple
      * times.
      */
-    fun close() {
+    suspend fun close() {
         // `disconnect` on the Rust side issues a final `Disconnect`
-        // packet and then calls back into MeshTransport.shutdown(); we
-        // run it on a background thread because UniFFI blocks the
-        // calling thread until the tokio future resolves.
-        runBlocking(Dispatchers.IO) {
+        // packet and then calls back into MeshTransport.shutdown(). UniFFI
+        // blocks the calling thread until the tokio future resolves, so we
+        // hop onto Dispatchers.IO; callers must invoke close() from a
+        // coroutine (it is a suspend fun) and never on the main thread.
+        withContext(Dispatchers.IO) {
             runCatching { meshService.disconnect() }
         }
         when (transport) {

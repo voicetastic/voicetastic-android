@@ -3,6 +3,8 @@
     <string name="permissions_denied_title">Voicetastic needs a few permissions</string>
     <string name="permissions_denied_body">Microphone access is required to record voice messages, and Bluetooth permissions are required to talk to your Meshtastic node. Grant them in Settings or tap Retry to be asked again.</string>
     <string name="permissions_denied_retry">Retry</string>
+    <string name="permissions_denied_permanent_body">You\'ve denied a required permission. Open Settings to grant microphone and Bluetooth access, then return to the app.</string>
+    <string name="permissions_denied_open_settings">Open Settings</string>
 
     <!-- Chat Screen -->
     <string name="chat_status_connected">Mesh: %s</string>

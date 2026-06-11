@@ -21,6 +21,8 @@ import uniffi.voicetastic.MeshDataListener
 import uniffi.voicetastic.MeshService
 import uniffi.voicetastic.MeshStateListener
 import uniffi.voicetastic.MeshTextListener
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
 
 class MeshServiceManager(private val context: Context) : MeshFacade {
 
@@ -56,11 +58,53 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
 
+    // Single-thread confinement for every UniFFI listener callback and for the
+    // caller-thread mutators that touch the same state (clearSessionState,
+    // resetNodeDb). UniFFI fires each listener on its own tokio worker thread,
+    // so without this nodeMap / myNodeNum / the read-modify-write StateFlows
+    // would be mutated concurrently. Running all of them on one thread makes
+    // each multi-field callback atomic with respect to every other.
+    private val listenerExecutor = Executors.newSingleThreadExecutor { r ->
+        Thread(r, "mesh-listener").apply { isDaemon = true }
+    }
+    private val listenerScope =
+        CoroutineScope(listenerExecutor.asCoroutineDispatcher() + SupervisorJob())
+    // Survives scope.cancel() in destroy() so the final blocking teardown
+    // (session close, rustService.close) can run after the manager is torn down.
+    private val teardownScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
     val deviceDiscovery = DeviceDiscoveryManager(context)
     private val networkDiscovery = NetworkDiscoveryManager(context)
 
     private val rustService: MeshService = MeshService()
-    private var rustSession: RustMeshSession? = null
+    @Volatile private var rustSession: RustMeshSession? = null
+
+    // Connect lifecycle. `connectJob` tracks the in-flight connect coroutine so
+    // a disconnect / new connect can cancel it; `connectGen` is a monotonic
+    // token re-checked before a freshly-built session is assigned, so a session
+    // created during a (slow) GATT setup is closed rather than leaked when the
+    // user changed intent meanwhile. `connectLock` makes the gen-bump +
+    // job-swap atomic across the caller thread and the reconnect loop.
+    private val connectLock = Any()
+    private var connectJob: Job? = null
+    private val connectGen = AtomicInteger(0)
+    // Suppresses the auto-reconnect loop while a user-initiated connect is in
+    // flight: closing the previous session makes Rust emit Disconnected, which
+    // would otherwise schedule a competing reconnect to the same radio.
+    @Volatile private var userConnectInFlight = false
+
+    /** Run [block] on the single listener thread (confinement helper). */
+    private fun listenerLaunch(block: suspend CoroutineScope.() -> Unit) {
+        listenerScope.launch(block = block)
+    }
+
+    /**
+     * Convert a Meshtastic `rx_time` (epoch seconds, UInt) to epoch millis.
+     * Radios without a time fix report `rx_time == 0`, which would otherwise
+     * render as a 1970 timestamp in chat — fall back to wall-clock now.
+     */
+    private fun rxTimestampMs(rxTime: UInt): Long =
+        if (rxTime != 0u) rxTime.toLong() * 1000L else System.currentTimeMillis()
 
     // --- Auto-reconnect (BLE only) ---
     // `lastBleDevice` is the device we should fall back to after an unexpected
@@ -101,15 +145,18 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         field = MutableStateFlow<Map<Int, List<NodeSample>>>(emptyMap())
 
     private fun pushNodeSample(nodeNum: Int, battery: Int?, snr: Float) {
-        val current = nodeHistory.value
-        val buf = current[nodeNum].orEmpty()
-        val last = buf.lastOrNull()
-        // Skip when neither metric moved since the last sample — keeps
-        // the ring buffer trend-shaped instead of repeating values.
-        if (last != null && last.battery == battery && kotlin.math.abs(last.snr - snr) < 0.01f) return
-        val next = (buf + NodeSample(System.currentTimeMillis(), battery, snr))
-            .takeLast(NODE_HISTORY_CAP)
-        nodeHistory.value = current + (nodeNum to next)
+        nodeHistory.update { current ->
+            val buf = current[nodeNum].orEmpty()
+            val last = buf.lastOrNull()
+            // Skip when neither metric moved since the last sample — keeps
+            // the ring buffer trend-shaped instead of repeating values.
+            if (last != null && last.battery == battery && kotlin.math.abs(last.snr - snr) < 0.01f) {
+                return@update current
+            }
+            val next = (buf + NodeSample(System.currentTimeMillis(), battery, snr))
+                .takeLast(NODE_HISTORY_CAP)
+            current + (nodeNum to next)
+        }
     }
 
     /**
@@ -118,13 +165,17 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
      * every event worth surfacing on the Debug screen.
      */
     private fun pushDebug(source: String, message: String, level: DebugLevel = DebugLevel.Info) {
-        val current = debugLog.value
-        val capped = if (current.size >= DEBUG_LOG_CAP) {
-            current.drop(current.size - DEBUG_LOG_CAP + 1)
-        } else {
-            current
+        // Atomic RMW: pushDebug is called both from the listener thread and
+        // from the reconnect loop (scope thread), so update{} avoids a lost
+        // append when the two race.
+        debugLog.update { current ->
+            val capped = if (current.size >= DEBUG_LOG_CAP) {
+                current.drop(current.size - DEBUG_LOG_CAP + 1)
+            } else {
+                current
+            }
+            capped + DebugEntry(level = level, source = source, message = message)
         }
-        debugLog.value = capped + DebugEntry(level = level, source = source, message = message)
     }
 
     fun clearDebugLog() {
@@ -194,6 +245,12 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         usbTransport.requestPermission(device, onResult)
     }
 
+    /**
+     * Begin a USB connection. Returns true when the attempt is *accepted and
+     * started* — the blocking port open and Rust handshake run off the caller
+     * thread, so the real outcome is observed via [connectionState] /
+     * [activeTransport], not this return value.
+     */
     override fun connectUsb(driver: UsbSerialDriver): Boolean {
         // USB re-enumerates with a fresh handle on reboot (the OS attach
         // broadcast drives reconnection), so we don't run the BLE retry loop
@@ -201,47 +258,80 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         autoReconnect = false
         lastBleDevice = null
         cancelReconnect()
-        runCatching { rustSession?.close() }
-        rustSession = null
         usbActive = true
         activeTransport.value = TransportType.USB
         connectionState.value = "CONNECTING"
         configBurstInProgress = true
-        val ok = usbTransport.connect(driver)
-        if (!ok) {
-            usbActive = false
-            activeTransport.value = TransportType.NONE
-            connectionState.value = "DISCONNECTED"
-            return false
+        val gen: Int
+        synchronized(connectLock) {
+            gen = connectGen.incrementAndGet()
+            connectJob?.cancel()
+            val prev = rustSession
+            rustSession = null
+            connectJob = scope.launch {
+                runCatching { prev?.close() }
+                val ok = try { usbTransport.connect(driver) } catch (t: Throwable) {
+                    Log.e(TAG, "USB connect failed", t); false
+                }
+                if (gen != connectGen.get()) {
+                    if (ok) usbTransport.disconnect()
+                    return@launch
+                }
+                if (!ok) {
+                    usbActive = false
+                    activeTransport.value = TransportType.NONE
+                    connectionState.value = "DISCONNECTED"
+                    return@launch
+                }
+                try {
+                    val session = RustMeshSession.openUsb(rustService, usbTransport)
+                    if (gen != connectGen.get()) {
+                        session.close()
+                        usbTransport.disconnect()
+                        return@launch
+                    }
+                    rustSession = session
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Rust USB connect failed", t)
+                    usbTransport.disconnect()
+                    usbActive = false
+                    activeTransport.value = TransportType.NONE
+                    connectionState.value = "DISCONNECTED"
+                }
+            }
         }
-        runCatching {
-            rustSession = RustMeshSession.openUsb(rustService, usbTransport)
-        }.onFailure { t ->
-            Log.e(TAG, "Rust USB connect failed", t)
-            usbTransport.disconnect()
-            usbActive = false
-            activeTransport.value = TransportType.NONE
-            connectionState.value = "DISCONNECTED"
-            return false
-        }
-        return ok
+        return true
     }
 
     override fun disconnectUsb() {
         autoReconnect = false
         lastBleDevice = null
         cancelReconnect()
-        runCatching { rustSession?.close() }
-        rustSession = null
-        usbTransport.disconnect()
+        val prev: RustMeshSession?
+        synchronized(connectLock) {
+            connectGen.incrementAndGet()
+            connectJob?.cancel(); connectJob = null
+            prev = rustSession
+            rustSession = null
+        }
         usbActive = false
         activeTransport.value = TransportType.NONE
         clearSessionState()
         connectionState.value = "DISCONNECTED"
+        scope.launch {
+            runCatching { prev?.close() }
+            usbTransport.disconnect()
+        }
         Log.i(TAG, "Disconnected (USB)")
     }
 
+    /** Caller-thread entry point: confines the clear onto the listener thread. */
     private fun clearSessionState() {
+        listenerScope.launch { clearSessionStateInternal() }
+    }
+
+    /** Must run on the listener thread (mutates nodeMap / myNodeNum). */
+    private fun clearSessionStateInternal() {
         myNodeNum = null
         configBurstInProgress = false
         myNodeId.value = null
@@ -384,99 +474,107 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     init {
         rustService.setStateListener(object : MeshStateListener {
             override fun onState(state: MeshConnectionState) {
-                val mapped = when (state) {
-                    MeshConnectionState.CONNECTED, MeshConnectionState.READY -> "CONNECTED"
-                    MeshConnectionState.CONNECTING, MeshConnectionState.CONFIGURING -> "CONNECTING"
-                    MeshConnectionState.DISCONNECTED -> "DISCONNECTED"
-                }
-                Log.d(TAG, "Rust state -> $state (mapped=$mapped)")
-                pushDebug("transport", "state → $state")
+                listenerScope.launch {
+                    val mapped = when (state) {
+                        MeshConnectionState.CONNECTED, MeshConnectionState.READY -> "CONNECTED"
+                        MeshConnectionState.CONNECTING, MeshConnectionState.CONFIGURING -> "CONNECTING"
+                        MeshConnectionState.DISCONNECTED -> "DISCONNECTED"
+                    }
+                    Log.d(TAG, "Rust state -> $state (mapped=$mapped)")
+                    pushDebug("transport", "state → $state")
 
-                // Suppress CONNECTING (which Rust emits as CONFIGURING during a
-                // user-initiated refresh) while we're already connected and inside
-                // the scan window. Without this, tapping Scan Nodes makes the UI
-                // fall back to the device picker for the duration of the burst.
-                // DISCONNECTED is never suppressed — actual transport loss must
-                // still flow through.
-                val now = System.currentTimeMillis()
-                if (mapped == "CONNECTING"
-                    && connectionState.value == "CONNECTED"
-                    && now < suppressConnectingUntilMs
-                ) {
-                    Log.d(TAG, "state: suppressing transient CONNECTING during scan refresh")
-                    return
-                }
+                    // Suppress CONNECTING (which Rust emits as CONFIGURING during a
+                    // user-initiated refresh) while we're already connected and inside
+                    // the scan window. Without this, tapping Scan Nodes makes the UI
+                    // fall back to the device picker for the duration of the burst.
+                    // DISCONNECTED is never suppressed — actual transport loss must
+                    // still flow through.
+                    val now = System.currentTimeMillis()
+                    if (mapped == "CONNECTING"
+                        && connectionState.value == "CONNECTED"
+                        && now < suppressConnectingUntilMs
+                    ) {
+                        Log.d(TAG, "state: suppressing transient CONNECTING during scan refresh")
+                        return@launch
+                    }
 
-                connectionState.value = mapped
-                if (state == MeshConnectionState.DISCONNECTED) {
-                    clearSessionState()
-                    activeTransport.value = TransportType.NONE
-                    usbActive = false
-                    // Unexpected drop (radio reboot, link loss): start retrying
-                    // the last BLE device. No-op after a deliberate disconnect,
-                    // which clears `autoReconnect` first.
-                    maybeScheduleReconnect()
+                    connectionState.value = mapped
+                    if (state == MeshConnectionState.DISCONNECTED) {
+                        // Already on the listener thread — clear directly.
+                        clearSessionStateInternal()
+                        activeTransport.value = TransportType.NONE
+                        usbActive = false
+                        // Unexpected drop (radio reboot, link loss): start retrying
+                        // the last BLE device. No-op after a deliberate disconnect,
+                        // which clears `autoReconnect` first.
+                        maybeScheduleReconnect()
+                    }
                 }
             }
         })
 
         rustService.setTextListener(object : MeshTextListener {
             override fun onText(message: uniffi.voicetastic.IncomingTextMsg) {
-                val toInt = message.to.toInt()
-                val isBroadcast = toInt == MeshtasticBle.BROADCAST_ADDR
-                val toId = if (isBroadcast) "broadcast" else MeshtasticBle.nodeNumToId(toInt)
-                Log.d(
-                    TAG,
-                    "rx text from=${message.fromId} to=$toId (raw=0x${toInt.toUInt().toString(16)}) ch=${message.channel} bytes=${message.text.length}"
-                )
-                pushDebug(
-                    "mesh",
-                    "rx text from=${message.fromId} to=$toId ch=${message.channel} (${message.text.length}B)",
-                )
-                incomingTextMessages.tryEmit(
-                    IncomingText(
-                        from = message.fromId,
-                        to = toId,
-                        text = message.text,
-                        channel = message.channel.toInt(),
-                        timestamp = message.rxTime.toLong() * 1000L,
+                listenerScope.launch {
+                    val toInt = message.to.toInt()
+                    val isBroadcast = toInt == MeshtasticBle.BROADCAST_ADDR
+                    val toId = if (isBroadcast) "broadcast" else MeshtasticBle.nodeNumToId(toInt)
+                    Log.d(
+                        TAG,
+                        "rx text from=${message.fromId} to=$toId (raw=0x${toInt.toUInt().toString(16)}) ch=${message.channel} bytes=${message.text.length}"
                     )
-                )
+                    pushDebug(
+                        "mesh",
+                        "rx text from=${message.fromId} to=$toId ch=${message.channel} (${message.text.length}B)",
+                    )
+                    incomingTextMessages.tryEmit(
+                        IncomingText(
+                            from = message.fromId,
+                            to = toId,
+                            text = message.text,
+                            channel = message.channel.toInt(),
+                            timestamp = rxTimestampMs(message.rxTime),
+                        )
+                    )
+                }
             }
         })
 
         rustService.setDataListener(object : MeshDataListener {
             override fun onData(message: uniffi.voicetastic.IncomingDataMsg) {
-                val fromNum = message.from.toInt()
-                val fromId = MeshtasticBle.nodeNumToId(fromNum)
-                val toInt = message.to.toInt()
-                val isBroadcast = toInt == MeshtasticBle.BROADCAST_ADDR
-                val toId = if (isBroadcast) "broadcast" else MeshtasticBle.nodeNumToId(toInt)
-                Log.d(
-                    TAG,
-                    "rx data from=$fromId to=$toId (raw=0x${toInt.toUInt().toString(16)}) port=${message.portnum} ch=${message.channel} len=${message.payload.size}"
-                )
-
-                when (message.portnum) {
-                    Ports.NODEINFO_APP -> mergeNodeFromUser(fromNum, message.payload, message.rxTime.toLong())
-                    Ports.POSITION_APP -> mergeNodeFromPosition(fromNum, message.payload, message.rxTime.toLong())
-                }
-
-                incomingDataMessages.tryEmit(
-                    IncomingData(
-                        from = fromId,
-                        to = toId,
-                        portNum = message.portnum,
-                        payload = message.payload,
-                        channel = message.channel.toInt(),
-                        timestamp = message.rxTime.toLong() * 1000L,
+                listenerScope.launch {
+                    val fromNum = message.from.toInt()
+                    val fromId = MeshtasticBle.nodeNumToId(fromNum)
+                    val toInt = message.to.toInt()
+                    val isBroadcast = toInt == MeshtasticBle.BROADCAST_ADDR
+                    val toId = if (isBroadcast) "broadcast" else MeshtasticBle.nodeNumToId(toInt)
+                    Log.d(
+                        TAG,
+                        "rx data from=$fromId to=$toId (raw=0x${toInt.toUInt().toString(16)}) port=${message.portnum} ch=${message.channel} len=${message.payload.size}"
                     )
-                )
+
+                    when (message.portnum) {
+                        Ports.NODEINFO_APP -> mergeNodeFromUser(fromNum, message.payload, message.rxTime.toLong())
+                        Ports.POSITION_APP -> mergeNodeFromPosition(fromNum, message.payload, message.rxTime.toLong())
+                    }
+
+                    incomingDataMessages.tryEmit(
+                        IncomingData(
+                            from = fromId,
+                            to = toId,
+                            portNum = message.portnum,
+                            payload = message.payload,
+                            channel = message.channel.toInt(),
+                            timestamp = rxTimestampMs(message.rxTime),
+                        )
+                    )
+                }
             }
         })
 
         rustService.setAckListener(object : MeshAckListener {
             override fun onAck(packetId: UInt, result: AckResultKind) {
+                listenerScope.launch {
                 val status = when (result) {
                     AckResultKind.DELIVERED -> DeliveryStatus.Delivered
                     AckResultKind.FAILED -> DeliveryStatus.Failed
@@ -496,11 +594,12 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     level,
                 )
                 ackEvents.tryEmit(MeshAckEvent(packetId, status))
+                }
             }
         })
 
         rustService.setConfigListener(object : MeshConfigListener {
-            override fun onMyInfo(encoded: ByteArray) {
+            override fun onMyInfo(encoded: ByteArray) = listenerLaunch {
                 runCatching { MeshProtos.MyNodeInfo.parseFrom(encoded) }
                     .onSuccess { info ->
                         // `0` is never a real node num. A 0 here means the
@@ -519,7 +618,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     }
             }
 
-            override fun onNodeInfo(num: UInt, encoded: ByteArray) {
+            override fun onNodeInfo(num: UInt, encoded: ByteArray) = listenerLaunch {
                 // The node number comes from the bridge as a separate FFI arg,
                 // not from the parsed proto: the vendored Android NodeInfo
                 // schema declares `num` as fixed32 while the bridge encodes it
@@ -600,12 +699,12 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     }
             }
 
-            override fun onConfig(encoded: ByteArray) {
+            override fun onConfig(encoded: ByteArray) = listenerLaunch {
                 runCatching { MeshProtos.Config.parseFrom(encoded) }
                     .onSuccess { handleConfig(it) }
             }
 
-            override fun onModuleConfig(encoded: ByteArray) {
+            override fun onModuleConfig(encoded: ByteArray) = listenerLaunch {
                 runCatching { MeshProtos.ModuleConfig.parseFrom(encoded) }
                     .onSuccess { mc ->
                         // Only the MQTT variant has a UI today; the rest
@@ -616,7 +715,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     }
             }
 
-            override fun onChannel(encoded: ByteArray) {
+            override fun onChannel(encoded: ByteArray) = listenerLaunch {
                 runCatching { MeshProtos.Channel.parseFrom(encoded) }
                     .onSuccess { ch ->
                         val current = channels.value.toMutableList()
@@ -626,7 +725,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     }
             }
 
-            override fun onOwner(encoded: ByteArray) {
+            override fun onOwner(encoded: ByteArray) = listenerLaunch {
                 runCatching { MeshProtos.User.parseFrom(encoded) }
                     .onSuccess { user ->
                         owner.value = user
@@ -655,7 +754,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     }
             }
 
-            override fun onMetadata(encoded: ByteArray) {
+            override fun onMetadata(encoded: ByteArray) = listenerLaunch {
                 runCatching { MeshProtos.DeviceMetadata.parseFrom(encoded) }
                     .onSuccess { md ->
                         if (md.firmwareVersion.isNotEmpty()) {
@@ -664,7 +763,7 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
                     }
             }
 
-            override fun onConfigComplete(nonce: UInt) {
+            override fun onConfigComplete(nonce: UInt) = listenerLaunch {
                 configBurstInProgress = false
                 nodes.value = nodeMap.values.toList()
                 configComplete.tryEmit(nonce.toInt())
@@ -690,6 +789,13 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
 
     // ==========  NETWORK CONNECTION  ==========
 
+    /**
+     * Begin a TCP connection. Returns true when the attempt is *accepted and
+     * started* — the blocking socket connect (up to 8 s) and Rust handshake
+     * run off the caller thread, so the real outcome is observed via
+     * [connectionState] / [activeTransport], not this return value. (Calling
+     * this on the main thread used to ANR on an unreachable host.)
+     */
     override fun connectTcp(host: String, port: Int): Boolean {
         // Like USB, TCP isn't part of the BLE auto-reconnect loop; stand any
         // pending one down and forget the BLE device.
@@ -697,27 +803,47 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         lastBleDevice = null
         cancelReconnect()
         stopNetworkScan()
-        runCatching { rustSession?.close() }
-        rustSession = null
         activeTransport.value = TransportType.NETWORK
         connectionState.value = "CONNECTING"
         configBurstInProgress = true
-        val transport = TcpMeshTransport(host, port)
-        if (!transport.connect()) {
-            activeTransport.value = TransportType.NONE
-            connectionState.value = "DISCONNECTED"
-            return false
+        val gen: Int
+        synchronized(connectLock) {
+            gen = connectGen.incrementAndGet()
+            connectJob?.cancel()
+            val prev = rustSession
+            rustSession = null
+            connectJob = scope.launch {
+                runCatching { prev?.close() }
+                val transport = TcpMeshTransport(host, port)
+                val ok = try { transport.connect() } catch (t: Throwable) {
+                    Log.e(TAG, "TCP connect failed", t); false
+                }
+                if (gen != connectGen.get()) {
+                    if (ok) transport.shutdown()
+                    return@launch
+                }
+                if (!ok) {
+                    activeTransport.value = TransportType.NONE
+                    connectionState.value = "DISCONNECTED"
+                    return@launch
+                }
+                try {
+                    val session = RustMeshSession.openTcp(rustService, transport)
+                    if (gen != connectGen.get()) {
+                        session.close()
+                        transport.shutdown()
+                        return@launch
+                    }
+                    rustSession = session
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Rust TCP connect failed", t)
+                    transport.shutdown()
+                    activeTransport.value = TransportType.NONE
+                    connectionState.value = "DISCONNECTED"
+                }
+            }
         }
-        return runCatching {
-            rustSession = RustMeshSession.openTcp(rustService, transport)
-            true
-        }.getOrElse { t ->
-            Log.e(TAG, "Rust TCP connect failed", t)
-            transport.shutdown()
-            activeTransport.value = TransportType.NONE
-            connectionState.value = "DISCONNECTED"
-            false
-        }
+        return true
     }
 
     // ==========  BLE CONNECTION  ==========
@@ -744,18 +870,42 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         connectionState.value = "CONNECTING"
         activeTransport.value = TransportType.BLE
         configBurstInProgress = true
-        scope.launch {
-            runCatching {
-                rustSession?.close()
-                rustSession = RustMeshSession.openBle(context, rustService, device)
-            }.onFailure { t ->
-                Log.e(TAG, "Rust BLE connect failed", t)
-                rustSession = null
-                activeTransport.value = TransportType.NONE
-                connectionState.value = "DISCONNECTED"
-                // The Rust state listener doesn't fire for an open that never
-                // connected, so kick the retry loop directly.
-                maybeScheduleReconnect()
+        // Mark a user/reconnect attempt in flight so closing the previous
+        // session (which makes Rust emit Disconnected) doesn't schedule a
+        // competing reconnect against the device we're already opening.
+        userConnectInFlight = true
+        val gen: Int
+        synchronized(connectLock) {
+            gen = connectGen.incrementAndGet()
+            connectJob?.cancel()
+            connectJob = scope.launch {
+                try {
+                    val prev = rustSession
+                    rustSession = null
+                    prev?.close()
+                    val session = RustMeshSession.openBle(context, rustService, device)
+                    if (gen != connectGen.get()) {
+                        // Intent changed during GATT setup (disconnect or a newer
+                        // connect): close the freshly-built session, don't leak it.
+                        session.close()
+                        return@launch
+                    }
+                    rustSession = session
+                } catch (c: CancellationException) {
+                    throw c
+                } catch (t: Throwable) {
+                    Log.e(TAG, "Rust BLE connect failed", t)
+                    if (gen == connectGen.get()) {
+                        rustSession = null
+                        activeTransport.value = TransportType.NONE
+                        connectionState.value = "DISCONNECTED"
+                        // The Rust state listener doesn't fire for an open that
+                        // never connected, so kick the retry loop directly.
+                        maybeScheduleReconnect()
+                    }
+                } finally {
+                    if (gen == connectGen.get()) userConnectInFlight = false
+                }
             }
         }
     }
@@ -766,12 +916,26 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         autoReconnect = false
         lastBleDevice = null
         cancelReconnect()
-        runCatching { rustSession?.close() }
-        rustSession = null
-        if (usbActive) usbTransport.disconnect()
+        val prev: RustMeshSession?
+        synchronized(connectLock) {
+            // Advance the generation so any in-flight connect coroutine sees the
+            // mismatch and closes its session instead of assigning it, then
+            // cancel the job.
+            connectGen.incrementAndGet()
+            connectJob?.cancel(); connectJob = null
+            prev = rustSession
+            rustSession = null
+        }
+        val wasUsb = usbActive
         usbActive = false
         activeTransport.value = TransportType.NONE
         connectionState.value = "DISCONNECTED"
+        // Non-blocking teardown: close() is a suspend fun and the disconnect of
+        // a flaky link can take a while; never block the (often main) caller.
+        scope.launch {
+            runCatching { prev?.close() }
+            if (wasUsb) usbTransport.disconnect()
+        }
     }
 
     fun unbind() = disconnect()
@@ -792,6 +956,10 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     @Synchronized
     private fun maybeScheduleReconnect() {
         if (!autoReconnect) return
+        // A user-initiated connect is mid-flight; closing the previous session
+        // fired the Disconnected that brought us here. Don't race a second
+        // transport against the connect already in progress.
+        if (userConnectInFlight) return
         val device = lastBleDevice ?: return
         if (reconnectJob?.isActive == true) return
         reconnectJob = scope.launch {
@@ -819,12 +987,34 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
     }
 
     override fun destroy() {
-        disconnect()
-        usbTransport.destroy()
-        deviceDiscovery.destroy()
-        networkDiscovery.destroy()
-        runCatching { rustService.close() }
-        scope.cancel()
+        // May be called on the main thread (SessionViewModel.onCleared), so it
+        // must not block. Stop reconnects + cancel the in-flight connect, then
+        // run all blocking teardown on teardownScope (which survives the
+        // scope.cancel below) so nothing is dropped mid-close.
+        autoReconnect = false
+        lastBleDevice = null
+        cancelReconnect()
+        val prev: RustMeshSession?
+        synchronized(connectLock) {
+            connectGen.incrementAndGet()
+            connectJob?.cancel(); connectJob = null
+            prev = rustSession
+            rustSession = null
+        }
+        usbActive = false
+        activeTransport.value = TransportType.NONE
+        connectionState.value = "DISCONNECTED"
+        teardownScope.launch {
+            runCatching { prev?.close() }
+            runCatching { usbTransport.destroy() }
+            runCatching { deviceDiscovery.destroy() }
+            runCatching { networkDiscovery.destroy() }
+            runCatching { rustService.close() }
+            scope.cancel()
+            listenerScope.cancel()
+            runCatching { listenerExecutor.shutdown() }
+            teardownScope.cancel()
+        }
     }
 
     /**
@@ -1129,9 +1319,12 @@ class MeshServiceManager(private val context: Context) : MeshFacade {
         // The firmware never re-bursts NodeInfo for an empty NodeDB, so
         // `refreshConfig()` alone wouldn't clear the visible peer list.
         // Drop the local mirror in lockstep so the UI forgets the wiped
-        // peers immediately, then re-pull config sections.
-        nodeMap.clear()
-        nodes.value = emptyList()
+        // peers immediately, then re-pull config sections. nodeMap is
+        // listener-thread-confined, so mutate it there.
+        listenerLaunch {
+            nodeMap.clear()
+            nodes.value = emptyList()
+        }
         runCatching { rustService.refreshConfig() }
             .onFailure { Log.e(TAG, "resetNodeDb: refreshConfig failed", it) }
         return true
